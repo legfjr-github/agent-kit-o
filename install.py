@@ -430,6 +430,132 @@ def preparar_delegar(ctx):
                                                  "atualizado": datetime.now().isoformat(timespec="seconds")}, indent=2), encoding="utf-8")
 
 
+# ---------------------------------------------------------------- acesso ao orquestrador (kit público)
+
+KIT_PUBLICO = True   # o montar_kit_publico.py troca para True: atalho, favorito e aviso só no kit público
+PAINEL_URL = "http://127.0.0.1:8790"
+PAINEL_NOME = "Orquestrador de IA (Delegar)"
+
+
+def pasta_shell(nome: str, padrao: Path) -> Path:
+    """Pasta especial do Windows (Desktop, Startup...), respeitando redirecionamento do OneDrive."""
+    if WINDOWS:
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as k:
+                return Path(os.path.expandvars(winreg.QueryValueEx(k, nome)[0]))
+        except OSError:
+            pass
+    return padrao
+
+
+def criar_lancador() -> Path:
+    """Script que sobe o painel (se não estiver no ar) e abre o navegador nele."""
+    cli = HOME / ".claude" / "skills" / "delegar" / "app" / "cli.mjs"
+    node = achar("node") or "node"
+    lanc = HOME / ".delegar" / "abrir-painel.cmd"
+    lanc.write_text(f'@echo off\r\n"{node}" "{cli}" iniciar >nul 2>&1\r\nif not "%1"=="--sem-navegador" start "" {PAINEL_URL}\r\n', encoding="utf-8")
+    return lanc
+
+
+def atalho_windows(lnk: Path, alvo: Path, args: str = "", descricao: str = ""):
+    """Cria um .lnk que roda o lançador sem janela de console."""
+    ps = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:AK_LNK);"
+          "$s.TargetPath=$env:ComSpec; $s.Arguments='/c \"\"'+$env:AK_ALVO+'\" '+$env:AK_ARGS+'\"';"
+          "$s.WindowStyle=7; $s.IconLocation=\"$env:SystemRoot\\System32\\imageres.dll,109\";"
+          "$s.Description=$env:AK_DESC; $s.WorkingDirectory=$env:USERPROFILE; $s.Save()")
+    env = dict(os.environ, AK_LNK=str(lnk), AK_ALVO=str(alvo), AK_ARGS=args, AK_DESC=descricao)
+    lnk.parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps], env=env,
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return r.returncode == 0 and lnk.exists()
+
+
+def chrome_aberto() -> bool:
+    r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq chrome.exe", "/NH"], capture_output=True, text=True, errors="replace")
+    return "chrome.exe" in r.stdout.lower()
+
+
+def favorito_chrome(user_data: Path) -> list:
+    """Põe o painel na barra de favoritos de cada perfil do Chrome. Devolve os perfis alterados."""
+    feitos = []
+    if not user_data.is_dir():
+        return feitos
+    for arq in sorted(user_data.glob("*/Bookmarks")):
+        try:
+            dados = json.loads(arq.read_text(encoding="utf-8"))
+            barra = dados["roots"]["bookmark_bar"]
+        except (OSError, ValueError, KeyError):
+            continue
+        texto = json.dumps(dados)
+        if PAINEL_URL in texto:
+            continue  # já tem
+        ids = [int(x) for x in re.findall(r'"id":\s*"(\d+)"', texto)] or [0]
+        import uuid
+        from datetime import timezone
+        agora = str(int((datetime.now(timezone.utc).replace(tzinfo=None) - datetime(1601, 1, 1)).total_seconds() * 1_000_000))
+        barra.setdefault("children", []).insert(0, {"date_added": agora, "date_last_used": "0", "guid": str(uuid.uuid4()),
+                                                    "id": str(max(ids) + 1), "name": PAINEL_NOME, "type": "url", "url": PAINEL_URL})
+        dados.pop("checksum", None)  # o Chrome recalcula
+        shutil.copy2(arq, arq.with_name("Bookmarks.bak-agent-kit"))
+        arq.write_text(json.dumps(dados, indent=3, ensure_ascii=False), encoding="utf-8")
+        feitos.append(arq.parent.name)
+    return feitos
+
+
+def abrir_painel(lanc: Path):
+    """Sobe o painel e abre o navegador nele, sem prender o instalador."""
+    subprocess.Popen(["cmd", "/c", str(lanc)], creationflags=0x08000000)
+
+
+def acesso_orquestrador():
+    """Atalho na área de trabalho, início com o Windows, favorito no Chrome e aviso de uso."""
+    if not WINDOWS:
+        return
+    info("Acesso ao orquestrador")
+    lanc = criar_lancador()
+    desktop = pasta_shell("Desktop", HOME / "Desktop")
+    if atalho_windows(desktop / f"{PAINEL_NOME}.lnk", lanc, "", "Abre o painel do orquestrador de agentes de IA"):
+        print(f"    Atalho criado na área de trabalho: {PAINEL_NOME}")
+    startup = pasta_shell("Startup", Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup")
+    if atalho_windows(startup / "Delegar - painel.lnk", lanc, "--sem-navegador", "Sobe o painel do orquestrador ao entrar no Windows"):
+        print("    O painel passa a subir sozinho ao entrar no Windows (atalho na pasta Inicializar), para o favorito funcionar.")
+    user_data = Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "User Data"
+    if user_data.is_dir():
+        if chrome_aberto():
+            print("    Chrome aberto: o favorito não foi adicionado (o Chrome sobrescreveria). Feche o Chrome e rode"
+                  " `python install.py --atalhos`, ou adicione à mão: " + PAINEL_URL)
+        else:
+            perfis = favorito_chrome(user_data)
+            if perfis:
+                print(f"    Favorito \"{PAINEL_NOME}\" na barra do Chrome (perfis: {', '.join(perfis)}).")
+    abrir_painel(lanc)
+    print(f"""
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ ORQUESTRADOR DE IA (DELEGAR)                                            │
+  └─────────────────────────────────────────────────────────────────────────┘
+  O que é: um painel em {PAINEL_URL} onde um modelo forte planeja um trabalho
+  grande e vários modelos executam em paralelo, trocando sozinhos de modelo
+  quando a cota acaba (e usando modelos gratuitos se tudo acabar).
+
+  Como abrir: atalho "{PAINEL_NOME}" na área de trabalho, o favorito
+  no Chrome, ou peça ao Claude/Gemini/opencode: "delegar: <o que você quer>".
+
+  Como usar:
+    1. Novo projeto: escolha a pasta do projeto e descreva o trabalho.
+    2. Modo: Padrão (econômico), Equilibrado, Agressivo, Desespero (só
+       gratuitos) ou Personalizado (você escolhe os modelos de cada papel).
+    3. Acompanhamento: Automático, Acompanhado (para e pergunta nos momentos
+       importantes) ou Passo a passo.
+    4. Converse com o planejador, confira o plano e clique em Aprovar.
+    5. Botão Atividade: quem está fazendo o quê, agora.
+  Antes: entre uma vez em cada CLI (rode `claude` e `agy`; o opencode usa os
+  gratuitos sem conta). Guia completo no cofre:
+  guias_e_comandos/skill_delegar_orquestracao.md
+""")
+
+
 # ---------------------------------------------------------------- mapa de projetos
 
 PULAR = {"node_modules", "venv", ".venv", "env", "__pycache__", "site-packages", "dist", "build", "target", "bin", "obj",
@@ -635,6 +761,7 @@ def main():
     ap.add_argument("--verificar", action="store_true")
     ap.add_argument("--silencioso", action="store_true")
     ap.add_argument("--minimo", action="store_true")
+    ap.add_argument("--atalhos", action="store_true", help="cria atalho, favorito no Chrome e início automático do painel")
     args = ap.parse_args()
     if not sys.stdout.isatty():
         try:
@@ -670,6 +797,9 @@ def main():
             "Mapear os projetos deste PC (pastas com .git ou arquivos de projeto em Documentos, Desktop, source, repos...)"
             " e criar uma nota para cada um no cofre?", False)):
         mapear_projetos(vault, kit)
+
+    if args.atalhos or (KIT_PUBLICO and not args.silencioso):
+        acesso_orquestrador()
 
     print(f"\nPronto. Cofre em {vault}")
     print("Orquestrador: diga ao Claude/Gemini \"delegar <pedido>\" ou rode "

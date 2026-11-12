@@ -14,6 +14,7 @@ Opções:
     --nao-mapear      não pergunta sobre o mapeamento
     --verificar       só mostra o diagnóstico (ferramentas, PATH, caminhos), sem mudar nada
     --silencioso      sem perguntas (usado pelo sync.py); não instala ferramentas nem mapeia
+    --minimo          não instala ferramentas nem CLIs de IA (por padrão a instalação é completa)
 
 Rodar de novo apenas atualiza (git pull + reinstala).
 """
@@ -29,12 +30,36 @@ from pathlib import Path
 
 HOME = Path.home()
 WINDOWS = os.name == "nt"
-SKILL_TARGETS = [
-    HOME / ".claude" / "skills",            # Claude Code
-    HOME / ".agents" / "skills",            # opencode
-    HOME / ".gemini" / "config" / "skills",  # Gemini CLI / Antigravity
-]
 GEMINI_RULES = HOME / ".gemini" / "config" / "rules"
+
+
+def ias():
+    """Cada IA que pode existir no PC: onde ficam as skills e o arquivo de regras globais.
+    'sempre' = instala mesmo sem a IA no PC (Claude, Gemini/Antigravity, opencode e a pasta comum ~/.agents)."""
+    win = HOME / ".codeium" / "windsurf"
+    return [
+        {"nome": "Claude Code", "base": HOME / ".claude", "cmd": "claude", "sempre": True,
+         "skills": [HOME / ".claude" / "skills"], "regras": ("claude", HOME / ".claude" / "CLAUDE.md")},
+        {"nome": "Antigravity (agy) e Gemini CLI", "base": HOME / ".gemini", "cmd": "agy", "sempre": True,
+         "skills": [HOME / ".gemini" / "config" / "skills", HOME / ".gemini" / "skills"],
+         "regras": ("bloco", HOME / ".gemini" / "GEMINI.md")},
+        {"nome": "opencode", "base": HOME / ".config" / "opencode", "cmd": "opencode", "sempre": True,
+         "skills": [HOME / ".config" / "opencode" / "skills"], "regras": ("opencode", None)},
+        {"nome": "Agentes compatíveis (~/.agents)", "base": HOME / ".agents", "cmd": None, "sempre": True,
+         "skills": [HOME / ".agents" / "skills"], "regras": None},
+        {"nome": "Codex", "base": HOME / ".codex", "cmd": "codex", "sempre": False,
+         "skills": [HOME / ".codex" / "skills"], "regras": ("bloco", HOME / ".codex" / "AGENTS.md")},
+        {"nome": "Qwen Code", "base": HOME / ".qwen", "cmd": "qwen", "sempre": False,
+         "skills": [HOME / ".qwen" / "skills"], "regras": ("bloco", HOME / ".qwen" / "QWEN.md")},
+        {"nome": "Windsurf", "base": win, "cmd": None, "sempre": False,
+         "skills": [win / "skills"], "regras": ("curto", win / "memories" / "global_rules.md")},
+        {"nome": "Cursor", "base": HOME / ".cursor", "cmd": "cursor", "sempre": False,
+         "skills": [HOME / ".cursor" / "skills"], "regras": None},
+    ]
+
+
+def ias_presentes():
+    return [a for a in ias() if a["sempre"] or a["base"].is_dir() or (a["cmd"] and shutil.which(a["cmd"]))]
 OPENCODE_DIR = HOME / ".config" / "opencode"
 CLAUDE_MD = HOME / ".claude" / "CLAUDE.md"
 TOOLS_DIR = HOME / "agent-kit-tools"   # versões portáteis instaladas pelo instalar.ps1
@@ -135,6 +160,7 @@ def diagnostico():
                  "Só opencode: tudo roda nos modelos gratuitos."))
     else:
         print("    Orquestrador: nenhuma CLI de IA encontrada (claude, agy ou opencode); o painel abre, mas não planeja.")
+    print("    IAs que vão receber skills e regras: " + ", ".join(a["nome"] for a in ias_presentes()))
     return achados
 
 
@@ -182,27 +208,31 @@ def adicionar_path(pastas, verificar):
 
 def instalar_ferramentas(kit, achados, args):
     """Chama o instalar.ps1 para o que faltar (versões portáteis) e o npm para as CLIs de IA."""
-    if args.verificar or args.silencioso:
+    """Instalação completa por padrão (sem perguntar); --minimo pula esta etapa."""
+    if args.verificar or args.silencioso or args.minimo:
         return achados
     faltam = [c for c in ("git", "node") if not achados.get(c)]
     if faltam and WINDOWS and (kit / "instalar.ps1").exists():
-        if perguntar(f"Faltam {', '.join(faltam)}. Instalar versões portáteis em {TOOLS_DIR}?", True):
-            subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                            str(kit / "instalar.ps1"), "-SoFerramentas"], check=False)
-            adicionar_path([TOOLS_DIR / "node", TOOLS_DIR / "git" / "cmd"], False)
-            achados = {c: achar(c) for _, c, _, _ in FERRAMENTAS}
+        info(f"Instalando {', '.join(faltam)} em versão portátil ({TOOLS_DIR})")
+        subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                        str(kit / "instalar.ps1"), "-SoFerramentas"], check=False)
+        adicionar_path([TOOLS_DIR / "node", TOOLS_DIR / "git" / "cmd"], False)
+        achados = {c: achar(c) for _, c, _, _ in FERRAMENTAS}
     elif faltam:
         print(f"    Instale {', '.join(faltam)} pelo gerenciador de pacotes do sistema e rode de novo.")
     npm = achados.get("npm") or achar("npm")
-    pacotes = [("claude", "@anthropic-ai/claude-code", "Claude Code"), ("opencode", "opencode-ai", "opencode")]
+    pacotes = [("claude", "@anthropic-ai/claude-code", "Claude Code"), ("opencode", "opencode-ai", "opencode"),
+               ("gemini", "@google/gemini-cli", "Gemini CLI")]
     faltam_cli = [(c, pkg, nome) for c, pkg, nome in pacotes if not achados.get(c)]
-    if npm and faltam_cli and perguntar(f"Instalar {', '.join(n for _, _, n in faltam_cli)} pelo npm?", True):
+    if npm and faltam_cli:
         for c, pkg, nome in faltam_cli:
-            info(f"npm install -g {pkg}")
+            info(f"Instalando {nome} (npm install -g {pkg})")
             subprocess.run([npm, "install", "-g", pkg], check=False)
             achados[c] = achar(c)
-        print("    Faça o login de cada uma uma vez: `claude` (conta Anthropic) e `opencode auth login` se quiser provedores pagos;"
-              " os modelos *-free do opencode não pedem conta.")
+        print("    Faça o login de cada uma uma vez: `claude` (conta Anthropic), `gemini` (conta Google) e, no opencode,"
+              " `opencode auth login` só se quiser provedores pagos; os modelos *-free não pedem conta.")
+    elif faltam_cli:
+        print(f"    Sem npm: não deu para instalar {', '.join(n for _, _, n in faltam_cli)}.")
     if not achados.get("agy"):
         print("    Antigravity (agy): não há versão portátil. Para usar o Gemini, instale o Antigravity IDE"
               " (https://antigravity.google) e rode `agy` uma vez para entrar com a conta Google.")
@@ -239,7 +269,10 @@ def copy_rendered(src: Path, dst: Path, ctx: dict):
 
 def install_skills(kit: Path, ctx: dict):
     skills = sorted(p.name for p in (kit / "skills").iterdir() if (p / "SKILL.md").exists())
-    for target in SKILL_TARGETS:
+    alvos = []
+    for ia in ias_presentes():
+        alvos += [(ia["nome"], d) for d in ia["skills"]]
+    for nome_ia, target in alvos:
         target.mkdir(parents=True, exist_ok=True)
         manifest = target / MANIFEST
         previous = set(json.loads(manifest.read_text())) if manifest.exists() else set()
@@ -251,7 +284,7 @@ def install_skills(kit: Path, ctx: dict):
             except PermissionError as e:  # ex.: painel do delegar aberto segurando um arquivo
                 print(f"    [AVISO] {name} em {target}: {e}. Feche o que estiver usando a pasta e rode de novo.")
         manifest.write_text(json.dumps(skills, indent=2))
-        print(f"    {len(skills)} skills -> {target}")
+        print(f"    {len(skills)} skills -> {nome_ia}: {target}")
 
 
 def install_rules(kit: Path, ctx: dict):
@@ -283,6 +316,7 @@ def install_rules(kit: Path, ctx: dict):
                 text = re.sub(r"\{", lambda m: "{\n  \"instructions\": [" + entries.rstrip(",") + "\n  ],", text, count=1)
             cfg.write_text(text, encoding="utf-8")
 
+    # Claude Code: importa os arquivos (@caminho) no CLAUDE.md do usuário
     CLAUDE_MD.parent.mkdir(parents=True, exist_ok=True)
     block = "\n".join([BLOCK_START] + [f"@{p}" for p in paths] + [BLOCK_END])
     current = CLAUDE_MD.read_text(encoding="utf-8") if CLAUDE_MD.exists() else ""
@@ -293,7 +327,30 @@ def install_rules(kit: Path, ctx: dict):
     else:
         current = (current.rstrip() + "\n\n" if current.strip() else "") + block + "\n"
     CLAUDE_MD.write_text(current, encoding="utf-8")
-    print(f"    {len(rules)} regras -> Gemini, opencode e Claude Code")
+    feitos = ["Claude Code (CLAUDE.md)", "opencode (instructions)"]
+
+    # Demais IAs: o texto das regras vai dentro de um bloco no arquivo de memória global de cada uma
+    completo = "\n\n".join(rendered.values())
+    curto = "\n\n".join(rendered[n] for n in ("uso-do-kit.md", "knowledge-vault.md") if n in rendered)  # Windsurf: limite ~6000 caracteres
+    for ia in ias_presentes():
+        r = ia["regras"]
+        if not r or r[0] not in {"bloco", "curto"}:
+            continue
+        gravar_bloco(r[1], curto if r[0] == "curto" else completo)
+        feitos.append(f"{ia['nome']} ({r[1].name})")
+    print(f"    {len(rules)} regras -> " + "; ".join(feitos))
+
+
+def gravar_bloco(arquivo: Path, texto: str):
+    """Põe o texto entre os marcadores do agent-kit no arquivo, preservando o resto."""
+    arquivo.parent.mkdir(parents=True, exist_ok=True)
+    bloco = f"{BLOCK_START}\n<!-- gerado pelo install.py do agent-kit; edite em agent-kit/rules -->\n{texto.strip()}\n{BLOCK_END}"
+    atual = arquivo.read_text(encoding="utf-8") if arquivo.exists() else ""
+    if BLOCK_START in atual:
+        atual = re.sub(re.escape(BLOCK_START) + r".*?" + re.escape(BLOCK_END), lambda m: bloco, atual, flags=re.S)
+    else:
+        atual = (atual.rstrip() + "\n\n" if atual.strip() else "") + bloco + "\n"
+    arquivo.write_text(atual, encoding="utf-8")
 
 
 # ---------------------------------------------------------------- endereços quebrados
@@ -577,6 +634,7 @@ def main():
     ap.add_argument("--nao-mapear", action="store_true")
     ap.add_argument("--verificar", action="store_true")
     ap.add_argument("--silencioso", action="store_true")
+    ap.add_argument("--minimo", action="store_true")
     args = ap.parse_args()
     if not sys.stdout.isatty():
         try:

@@ -4,8 +4,9 @@ Kit para trabalhar com agentes de IA (Claude Code, Antigravity/Gemini, opencode,
 
 - **Cofre de conhecimento** (Markdown, compatível com Obsidian) que todos os agentes leem e atualizam: índice, log diário, próximos passos e notas por projeto.
 - **Orquestrador `delegar`**: um modelo forte planeja, modelos mais baratos executam em paralelo, com troca automática quando a cota acaba, modo com modelos gratuitos, paradas para confirmação e tela de atividade. Ajusta-se às CLIs instaladas no PC.
-- **Skills e regras globais**: escrita sem cara de IA, segurança por padrão, gestão do cofre, engenharia reversa, pixel art, Django.
-- **Cofre de exemplo** com padrões prontos: checklist de segurança e testes de ataque, padrões de testes, executáveis com Nuitka, interfaces com PyQt6, uso do orquestrador.
+- **Skills**: `delegar` (orquestrador), `knowledge-vault-manager` (cofre), `humanizer` (escrita sem cara de IA) e `sistemas-com-ia` (criar sistemas que usam IA pela API ou pelas CLIs locais).
+- **Regras globais** para todas as IAs: como usar o kit, consulta e atualização do cofre, segurança por padrão, redação humana.
+- **Cofre de exemplo** com padrões prontos: checklist de segurança e testes de ataque, padrões de testes, sistemas com integração de IA, executáveis com Nuitka, interfaces com PyQt6, uso do orquestrador.
 
 Nenhum dado pessoal ou projeto vem junto: o cofre começa vazio, só com os guias.
 
@@ -21,8 +22,8 @@ iwr https://raw.githubusercontent.com/legfjr-github/agent-kit-o/main/instalar.ps
 
 O instalador:
 1. Usa o Python, Git e Node que já existirem. O que faltar baixa em versão portátil (zip oficial) para `%USERPROFILE%\agent-kit-tools`, confere a assinatura digital e o SHA-256 e põe no PATH do usuário.
-2. Oferece instalar Claude Code e opencode pelo npm. O Antigravity (que traz a CLI `agy`) é instalado à parte, em https://antigravity.google.
-3. Clona o kit em `%USERPROFILE%\agent-kit`, copia skills e regras para Claude Code, opencode, Gemini CLI e Antigravity, trocando os caminhos pelos desta máquina.
+2. Instala Claude Code, opencode e Gemini CLI pelo npm (instalação completa; `install.py --minimo` pula). O Antigravity (que traz a CLI `agy`) é instalado à parte, em https://antigravity.google.
+3. Clona o kit em `%USERPROFILE%\agent-kit` e põe skills e regras em **todas as IAs do PC**: Claude Code, Antigravity, Gemini CLI, opencode e a pasta comum `~/.agents`, e também Codex, Qwen Code, Windsurf e Cursor quando estiverem instalados, trocando os caminhos pelos desta máquina.
 4. Corrige servidores MCP do opencode que apontem para executáveis inexistentes.
 5. Pergunta se deve **mapear os projetos do PC** e criar uma nota para cada um no cofre.
 
@@ -32,7 +33,8 @@ Só diagnóstico, sem mudar nada: `python %USERPROFILE%\agent-kit\install.py --v
 
 ## Usar
 
-- Peça ao agente coisas como "consulte o cofre", "registre no log", "delegar: <pedido grande>".
+- A regra `uso-do-kit` já diz a cada IA quando ler o cofre e qual skill usar. Peça normalmente; para forçar: "consulte o cofre", "registre no log", "delegar: <pedido grande>", "crie um sistema que usa IA para ...".
+- Comece cada projeto com uma nota no cofre (copie `vault/projetos/exemplo_projeto.md`): as IAs passam a ter contexto sem você repetir.
 - Painel do orquestrador: `node %USERPROFILE%\.claude\skills\delegar\app\cli.mjs iniciar` e abra http://127.0.0.1:8790.
 - Atualizar o kit: `python %USERPROFILE%\agent-kit\sync.py pull`.
 - Guardar seu cofre num repositório seu (privado): crie o repositório, troque o `origin` (`git remote set-url origin <seu repo>`) e use `python sync.py push "mensagem"`.

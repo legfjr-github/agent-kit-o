@@ -29,8 +29,8 @@ python sync.py pull                                           # atualiza (roda i
 
 ## install.py
 1. Mostra quais ferramentas existem e quem vai planejar no orquestrador.
-2. Oferece instalar Claude Code e opencode pelo npm. O Antigravity não tem versão portátil: instale o Antigravity IDE e rode `agy` uma vez.
-3. Copia skills para `~/.claude/skills`, `~/.agents/skills` (opencode) e `~/.gemini/config/skills` (Gemini/Antigravity), e regras para os três, trocando `{{VAULT_PATH}}`, `{{KIT_PATH}}`, `{{HOME}}`, `{{DOCS_PATH}}` pelos caminhos desta máquina.
+2. Instala Claude Code, opencode e Gemini CLI pelo npm sem perguntar (`--minimo` pula). O Antigravity não tem versão portátil: instale o Antigravity IDE e rode `agy` uma vez.
+3. Copia as skills para todas as IAs do PC (Claude Code `~/.claude/skills`; Antigravity `~/.gemini/config/skills`; Gemini CLI `~/.gemini/skills`; opencode `~/.config/opencode/skills`; pasta comum `~/.agents/skills`; e, se instalados, Codex `~/.codex/skills`, Qwen `~/.qwen/skills`, Windsurf `~/.codeium/windsurf/skills`, Cursor `~/.cursor/skills`). Regras: imports no `CLAUDE.md`, `instructions` do opencode e um bloco em `GEMINI.md`, `AGENTS.md` (Codex), `QWEN.md` e `global_rules.md` (Windsurf, versão curta), trocando `{{VAULT_PATH}}`, `{{KIT_PATH}}`, `{{HOME}}`, `{{DOCS_PATH}}` pelos caminhos desta máquina.
 4. Corrige servidores MCP do `opencode.jsonc` cujo executável não existe (backup em `.bak-agent-kit`) e avisa quando o script do servidor sumiu.
 5. Pergunta se deve mapear os projetos do PC: pastas com `.git` ou arquivos de projeto em Documentos, Desktop, source, repos, projects, dev, code. Cria `projetos/mapa_pc/<nome>.md` (caminho, tecnologias, remoto sem credenciais, branch, último commit, trecho do README, notas que já citam a pasta) e `projetos/00_mapa_de_projetos.md`, com link no índice e entrada no log. Não lê `.env`; notas escritas à mão não são alteradas.
 

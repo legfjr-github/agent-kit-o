@@ -19,6 +19,7 @@ const PAPEIS = [['planner', 'Planejador'], ['pesado', 'Nível pesado'], ['volume
 const ESFORCOS = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
 let MODES = {}, SUP = {}, CAT = { modelos: [], provedores: {} }, ULTIMO = null, PADRAO_CUSTOM = null;
 let atual = null, ultimoMsgs = -1, timer = null, vista = 'vazio', projAtual = null;
+const promptsAbertos = new Set();   // prompts de tarefa abertos: a tabela é refeita a cada 4 s e não pode fechá-los
 let novoCfg = null, projCfg = null;
 
 const flat = (t) => (Array.isArray(t?.[0]) ? t[0] : t || []);
@@ -114,7 +115,11 @@ function renderPlano(p) {
   const tb = $('tarefas').tBodies[0];
   const run = p.run?.status || {};
   const editavel = p.estado !== 'executando';
-  if (!p.plano) { $('planoResumo').textContent = 'Ainda sem plano.'; tb.replaceChildren(); $('divisao').replaceChildren(); $('verify').textContent = ''; return; }
+  if (!p.plano) { $('planoResumo').textContent = 'Ainda sem plano.'; tb.replaceChildren(); $('divisao').replaceChildren(); $('verify').textContent = ''; renderPlano.chave = null; return; }
+  // só refaz a tabela quando o plano ou o estado das tarefas muda (prompt aberto não fecha nem volta ao topo)
+  const chave = p.id + JSON.stringify([p.estado, p.plano.tarefas.map((t) => [t.id, t.nivel, t.cadeiaEfetiva]), run]);
+  if (renderPlano.chave === chave) return;
+  renderPlano.chave = chave;
   $('planoResumo').textContent = p.plano.resumo || '';
   const cont = {};
   for (const t of p.plano.tarefas) { const k = t.cadeiaEfetiva[0] || '-'; cont[k] = (cont[k] || 0) + 1; }
@@ -124,7 +129,7 @@ function renderPlano(p) {
     nivel.onchange = async () => { try { await call('POST', `/api/projetos/${p.id}/ajustes`, { niveis: { [t.id]: nivel.value } }); refresh(); } catch (e) { alert(e.message); } };
     const s = run[t.id];
     return el('tr', {},
-      el('td', {}, el('details', {}, el('summary', { text: `${t.id}: ${t.titulo || ''}${t.confirmar ? ' ⚑' : ''}` }),
+      el('td', {}, el('details', { open: promptsAbertos.has(p.id + '/' + t.id), ontoggle: (e) => { const k = p.id + '/' + t.id; if (e.target.open) promptsAbertos.add(k); else promptsAbertos.delete(k); } }, el('summary', { text: `${t.id}: ${t.titulo || ''}${t.confirmar ? ' ⚑' : ''}` }),
         t.confirmar ? el('p', { class: 'hint', text: 'Pede confirmação no modo acompanhado' + (t.motivo ? ': ' + t.motivo : '') }) : null, el('pre', { text: t.prompt }))),
       el('td', { text: t.tipo }), el('td', {}, nivel),
       el('td', { class: 'chain', text: t.cadeiaEfetiva.join(' → ') }),

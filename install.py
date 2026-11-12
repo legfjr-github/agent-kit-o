@@ -544,6 +544,19 @@ def garantir_automacao(args):
             print("    [AVISO] Google Chrome não encontrado; as automações web precisam dele (https://www.google.com/chrome).")
 
 
+def proteger_git(kit: Path, repos):
+    """Hook pre-commit contra arquivos apagados pelo antivírus (scripts/git_protecao.py) nos repositórios."""
+    script = kit / "scripts" / "git_protecao.py"
+    if not script.exists():
+        return 0
+    n = 0
+    for r in repos:
+        if (Path(r) / ".git").exists():
+            subprocess.run([sys.executable, str(script), "instalar", str(r)], capture_output=True)
+            n += 1
+    return n
+
+
 def abrir_painel(lanc: Path):
     """Sobe o painel e abre o navegador nele, sem prender o instalador."""
     subprocess.Popen(["cmd", "/c", str(lanc)], creationflags=0x08000000)
@@ -855,6 +868,9 @@ def mapear_projetos(vault: Path, kit: Path):
             novos += 1
         linhas_mapa.append(f"| [[projetos/mapa_pc/{nome}]] | `{p}` | {', '.join(tecs) or '-'} | {(g.get('ultimo') or '-')[:10] if g else '-'} | "
                            f"{', '.join(f'[[{r}]]' for r in relacionadas[:3]) or '-'} |")
+    protegidos = proteger_git(kit, projetos)
+    if protegidos:
+        print(f"    Proteção do git (arquivo apagado pelo antivírus não sai do repositório) instalada em {protegidos} repositórios.")
     mapa = vault / "projetos" / "00_mapa_de_projetos.md"
     mapa.write_text("# Mapa de projetos do PC\n\nGerado pelo instalador do agent-kit em " + hoje +
                     ". Rode `python install.py --mapear` para atualizar. As notas automáticas ficam em `projetos/mapa_pc/`;"
@@ -930,6 +946,7 @@ def main():
     install_rules(kit, ctx)
     preparar_delegar(ctx)
     garantir_automacao(args)
+    proteger_git(kit, [kit])
 
     if args.mapear or (not args.nao_mapear and not args.silencioso and perguntar(
             "Mapear os projetos deste PC (pastas com .git ou arquivos de projeto em Documentos, Desktop, source, repos...)"

@@ -4,6 +4,7 @@
 
 ## 🧭 Guias e comandos
 - [[guias_e_comandos/instalacao_agent_kit]]: **Instalação do kit** — o que o `instalar.ps1` e o `install.py` fazem, opções (`--verificar`, `--mapear`), ferramentas portáteis e PATH.
+- [[guias_e_comandos/git_protecao_antivirus]]: **Git protegido contra o antivírus** — arquivos apagados ou bloqueados pelo antivírus não somem do repositório (hook pre-commit, `.protegidos`, reparo).
 - [[guias_e_comandos/skill_delegar_orquestracao]]: **Orquestrador `delegar`** — modos (agressivo, equilibrado, padrão, desespero, personalizado), acompanhamento com paradas, tela de atividade, ranking dos modelos gratuitos.
 - [[guias_e_comandos/checklist_seguranca_sistemas_web]]: **Segurança e testes de ataque** — checklist obrigatório para sistemas com login, formulário público, painel ou dado pessoal; 21 testes de ataque.
 - [[guias_e_comandos/sistemas_com_ia]]: **Sistemas com IA** — API (Claude, Gemini) ou CLIs locais (Claude Code, agy, opencode): arquitetura, código base, saída estruturada, cota, custos, testes, injeção de prompt.

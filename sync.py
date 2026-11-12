@@ -24,6 +24,8 @@ def main():
         sys.exit(__doc__)
     if sys.argv[1] == "push":
         msg = sys.argv[2] if len(sys.argv) > 2 else "Atualiza cofre de conhecimento"
+        # hook pre-commit + reparo: arquivo apagado pelo antivírus não sai do git
+        subprocess.run([sys.executable, str(KIT / "scripts" / "git_protecao.py"), "instalar", str(KIT)], check=False)
         git("add", "-A")
         if subprocess.run(["git", "-C", str(KIT), "diff", "--cached", "--quiet"]).returncode:
             git("commit", "-m", msg)

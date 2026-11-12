@@ -32,6 +32,12 @@ O cofre divide-se nas seguintes categorias:
 
 ---
 
+## 🔌 Acesso pelo servidor MCP `vault`
+
+Se as ferramentas `list_notes`, `search_notes`, `read_note` e `write_note` (servidor MCP `vault`) estiverem disponíveis, prefira-as para ler e gravar notas: funcionam em qualquer pasta de trabalho e não saem do cofre. O servidor fica em `{{KIT_PATH}}\mcp\mcp_vault.py` e o `install.py` o registra no Claude Code, opencode, Antigravity, Gemini CLI, Qwen e Windsurf. Sem elas, leia e grave os arquivos direto em `{{VAULT_PATH}}`.
+
+---
+
 ## 🔍 Protocolo de Leitura (Índice em Camadas)
 
 Para gastar o mínimo de tokens possível e responder de forma rápida:

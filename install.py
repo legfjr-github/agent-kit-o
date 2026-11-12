@@ -504,7 +504,7 @@ def favorito_chrome(user_data: Path) -> list:
     return feitos
 
 
-PACOTES_AUTOMACAO = ["undetected-chromedriver", "selenium", "setuptools"]  # setuptools: distutils no Python 3.12+
+PACOTES_AUTOMACAO = ["undetected-chromedriver", "selenium", "setuptools", "mcp"]  # setuptools: distutils no 3.12+; mcp: servidor do cofre
 
 
 def chrome_instalado() -> bool:
@@ -527,7 +527,7 @@ def garantir_automacao(args):
     if args.verificar or args.minimo:
         return
     py = sys.executable
-    teste = subprocess.run([py, "-c", "import undetected_chromedriver, selenium"], capture_output=True, text=True)
+    teste = subprocess.run([py, "-c", "import undetected_chromedriver, selenium, mcp"], capture_output=True, text=True)
     if teste.returncode != 0:
         info("Instalando undetected-chromedriver e selenium (automação web)")
         r = subprocess.run([py, "-m", "pip", "install", "-U", *PACOTES_AUTOMACAO], capture_output=True, text=True,
@@ -542,6 +542,57 @@ def garantir_automacao(args):
                             "--accept-package-agreements", "--silent"], check=False)
         else:
             print("    [AVISO] Google Chrome não encontrado; as automações web precisam dele (https://www.google.com/chrome).")
+
+
+def _json_config(arq: Path, nome: str, entrada: dict, chave="mcpServers"):
+    """Grava/atualiza um servidor MCP num arquivo JSON de configuração, preservando o resto (backup antes)."""
+    dados = {}
+    if arq.exists():
+        try:
+            dados = json.loads(_sem_comentarios(arq.read_text(encoding="utf-8")) or "{}")
+        except ValueError:
+            return f"{arq.name}: JSON inválido, não alterado"
+        if dados.get(chave, {}).get(nome) == entrada:
+            return None
+        shutil.copy2(arq, arq.with_name(arq.name + ".bak-agent-kit"))
+    dados.setdefault(chave, {})[nome] = entrada
+    arq.parent.mkdir(parents=True, exist_ok=True)
+    arq.write_text(json.dumps(dados, indent=2, ensure_ascii=False), encoding="utf-8")
+    return str(arq)
+
+
+def registrar_mcp_cofre(kit: Path, vault: Path):
+    """Servidor MCP do cofre (mcp/mcp_vault.py: list_notes, search_notes, read_note, write_note) em todas as IAs."""
+    servidor = kit / "mcp" / "mcp_vault.py"
+    if not servidor.exists():
+        return
+    py, srv, env = Path(sys.executable).as_posix(), servidor.as_posix(), {"VAULT_PATH": str(vault)}
+    feitos = []
+    claude = achar("claude")
+    if claude:
+        atual = subprocess.run(["cmd", "/d", "/c", "claude", "mcp", "get", "vault"] if WINDOWS else [claude, "mcp", "get", "vault"],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+        if srv not in atual.stdout or py not in atual.stdout.replace("\\", "/"):
+            base = ["cmd", "/d", "/c", "claude"] if WINDOWS else [claude]
+            subprocess.run(base + ["mcp", "remove", "vault", "-s", "user"], capture_output=True, timeout=120)
+            r = subprocess.run(base + ["mcp", "add", "-s", "user", "vault", "-e", f"VAULT_PATH={vault}", "--", py, srv],
+                               capture_output=True, text=True, timeout=120)
+            feitos.append("Claude Code" if r.returncode == 0 else "Claude Code (falhou: rode `claude mcp add`)")
+        else:
+            feitos.append("Claude Code (já estava)")
+    oc = OPENCODE_DIR / "opencode.jsonc"
+    r = _json_config(oc, "vault", {"type": "local", "command": [py, srv], "environment": env, "enabled": True}, chave="mcp")
+    feitos.append("opencode" + ("" if r else " (já estava)"))
+    entrada = {"command": py, "args": [srv], "env": env}
+    alvos = [("Antigravity", HOME / ".gemini" / "config" / "mcp_config.json", True),
+             ("Gemini CLI", HOME / ".gemini" / "settings.json", True),
+             ("Qwen Code", HOME / ".qwen" / "settings.json", (HOME / ".qwen").is_dir()),
+             ("Windsurf", HOME / ".codeium" / "windsurf" / "mcp_config.json", (HOME / ".codeium" / "windsurf").is_dir())]
+    for nome, arq, usar in alvos:
+        if usar:
+            r = _json_config(arq, "vault", entrada)
+            feitos.append(nome + ("" if r and not r.startswith(arq.name) else " (já estava)" if r is None else f" ({r})"))
+    print("    Servidor MCP do cofre (vault) registrado: " + ", ".join(feitos))
 
 
 def proteger_git(kit: Path, repos):
@@ -947,6 +998,7 @@ def main():
     preparar_delegar(ctx)
     garantir_automacao(args)
     proteger_git(kit, [kit])
+    registrar_mcp_cofre(kit, vault)
 
     if args.mapear or (not args.nao_mapear and not args.silencioso and perguntar(
             "Mapear os projetos deste PC (pastas com .git ou arquivos de projeto em Documentos, Desktop, source, repos...)"

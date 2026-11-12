@@ -32,7 +32,7 @@ python %USERPROFILE%\agent-kit\scripts\git_protecao.py reparar <repo>     # só 
 git update-index --no-skip-worktree <arquivo>
 $env:GIT_PERMITIR_APAGAR = '1'; git rm --cached <arquivo>; git commit -m "remove <arquivo>"; Remove-Item Env:GIT_PERMITIR_APAGAR
 ```
-E tire o caminho do `.protegidos`, se estiver lá.
+O hook acrescenta `!<arquivo>` ao `.protegidos` no mesmo commit; assim o reparo não devolve o arquivo em nenhum PC.
 
 ## Quando um arquivo some
 1. Não recrie com outro nome para fugir do antivírus; peça à TI a liberação ou confira a quarentena.

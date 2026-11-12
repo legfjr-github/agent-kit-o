@@ -27,6 +27,7 @@ O instalador:
 4. Deixa o `undetected-chromedriver` (padrão das automações web, necessário para gov.br e sites parecidos) sempre instalado, com o Chrome, e corrige servidores MCP do opencode que apontem para executáveis inexistentes.
 5. Instala no kit (e, ao mapear, em cada repositório do PC) uma proteção do git: se o antivírus apagar ou bloquear um arquivo, o commit não registra a exclusão e o arquivo continua no repositório para os outros PCs (`scripts/git_protecao.py`).
 5a. Pergunta se deve **mapear os projetos do PC** e criar uma nota para cada um no cofre.
+5b. Registra o servidor MCP do cofre (`mcp/mcp_vault.py`) no Claude Code, opencode, Antigravity, Gemini CLI, Qwen e Windsurf, para qualquer IA ler e gravar notas do cofre de qualquer pasta.
 6. Dá acesso fácil ao orquestrador: atalho **"Orquestrador de IA (Delegar)"** na área de trabalho, favorito com o mesmo nome na barra do Chrome (todos os perfis; se o Chrome estiver aberto, avisa para fechar e rodar `python install.py --atalhos`) e início automático do painel com o Windows (pasta Inicializar), para o favorito sempre funcionar. No fim, abre o painel e mostra um resumo de como usar.
 
 Depois: faça login em cada CLI uma vez (`claude`, `agy`; o opencode usa os modelos gratuitos sem conta).

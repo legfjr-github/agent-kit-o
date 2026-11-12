@@ -111,4 +111,4 @@ Antes de finalizar qualquer texto, faça a conferência:
 ## 🔗 Links Relacionados
 - [[00_INDICE]]
 - [[arquitetura_e_padroes/pyqt6_design_desktop]]
-- [[guias_e_comandos/automacao_sei_pe_manual_operacional]]
+- [[guias_e_comandos/automacao_web]]

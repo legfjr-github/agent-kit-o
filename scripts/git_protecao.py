@@ -66,8 +66,27 @@ def bloqueado(repo: Path, caminho: str) -> bool:
     return False
 
 
+def listado(caminho: str, padroes) -> bool:
+    """Casa com algum padrão e não foi liberado com '!caminho' (remoção de propósito)."""
+    if any(p.startswith("!") and fnmatch.fnmatch(caminho, p[1:]) for p in padroes):
+        return False
+    return any(not p.startswith("!") and fnmatch.fnmatch(caminho, p) for p in padroes)
+
+
+def registrar_remocao(repo: Path, caminhos):
+    """Remoção de propósito de arquivo protegido: grava '!caminho' no .protegidos (vale em todos os PCs)."""
+    f = repo / ".protegidos"
+    atual = f.read_text(encoding="utf-8") if f.exists() else ""
+    novos = [c for c in caminhos if f"!{c}" not in atual.splitlines()]
+    if not novos:
+        return
+    f.write_text(atual.rstrip("\n") + "\n# removidos de propósito (o reparo não devolve):\n"
+                 + "".join(f"!{c}\n" for c in novos), encoding="utf-8")
+    git(repo, "add", "--", ".protegidos")
+
+
 def protegido(repo: Path, caminho: str, padroes) -> str | None:
-    if any(fnmatch.fnmatch(caminho, p) for p in padroes):
+    if listado(caminho, padroes):
         return "listado em .protegidos"
     if bloqueado(repo, caminho):
         return "o antivírus não deixa criar o arquivo neste PC"
@@ -82,12 +101,15 @@ def manter_no_git(repo: Path, caminho: str):
 
 def verificar():
     repo = raiz()
-    if not repo or os.environ.get("GIT_PERMITIR_APAGAR") == "1":
+    if not repo:
         return 0
     apagados = [l for l in git(repo, "diff", "--cached", "--name-only", "--diff-filter=D", "-z").split("\0") if l]
     if not apagados:
         return 0
     padroes = lista_protegidos(repo)
+    if os.environ.get("GIT_PERMITIR_APAGAR") == "1":
+        registrar_remocao(repo, [c for c in apagados if listado(c, padroes)])
+        return 0
     salvos = []
     for c in apagados:
         motivo = protegido(repo, c, padroes)
@@ -128,7 +150,7 @@ def reparar(repo: Path, profundidade=200, commitar=True):
             if item.startswith("@@"):
                 commit = item[2:]
                 continue
-            if not item or item in no_head or item in voltaram or not any(fnmatch.fnmatch(item, p) for p in padroes):
+            if not item or item in no_head or item in voltaram or not listado(item, padroes):
                 continue
             blob = git(repo, "rev-parse", f"{commit}^:{item}").strip()
             modo = git(repo, "ls-tree", f"{commit}^", "--", item).split(" ")[0] or "100644"

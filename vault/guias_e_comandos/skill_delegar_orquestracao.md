@@ -62,6 +62,13 @@ Duas tarefas no opencode em modo agente: escrever 4 funções (20 testes ocultos
 
 A lista de modelos gratuitos muda com o tempo: quando `opencode models` mostrar outros, refaça o teste e ajuste `DESESPERO` em `skills/delegar/app/modelos.mjs`.
 
+## Troca de modelo no meio da tarefa, retomada e resumo (12/11/2026)
+- **Troca de modelo por cota no meio da tarefa:** `worker.ps1` lê a cota do Claude a cada 10 min enquanto um modelo Claude trabalha (parâmetros `-HandoffAt 0.85` e `-QuotaCheckMinutes 10`; `quota.ps1` guarda a última leitura em `~/.delegar/state/quota-last.json` e aceita `-MaxAgeMinutes`). Ao passar de 85% na janela de 5 h ou 95% na semana, encerra o Claude e passa a tarefa ao próximo modelo da cadeia que não seja Claude, com um resumo das últimas ações e a instrução de conferir `git status`/`diff` e continuar.
+- **Retomada automática após queda:** se o processo do pipeline cair, o painel retoma sozinho até 3 vezes; a tarefa que estava no meio recebe aviso de tarefa retomada. Depois disso, botão Retomar ou `cli.mjs retomar <id>`.
+- **Resumo da execução:** no fim, a conversa do projeto recebe a mensagem "Resumo da execução" (o que cada tarefa entregou, modelo usado, trocas de modelo, commits) e o relatório do cofre ganha a seção Resumo.
+- **Instalação incremental:** o `install.py` só grava arquivos novos ou alterados, não apaga a pasta da skill.
+- **Teste feito:** cota falsa a 99%, cadeia `claude:haiku`, `claude:sonnet`, `opencode:opencode/big-pickle`: Haiku encerrado em 31 s, Sonnet pulado, `big-pickle` concluiu e fez o commit.
+
 ## Cuidados
 - Os agentes executam sem pedir confirmação (exceto as paradas do acompanhamento). Os prompts devem proibir mexer em segredos, outros repositórios e trabalho alheio.
 - Prompts curtos, apontando para arquivos: o agy recebe o prompt como argumento (limite de ~30 mil caracteres no Windows).

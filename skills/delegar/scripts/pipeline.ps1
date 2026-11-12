@@ -73,7 +73,9 @@ if ($Resume -and (Test-Path $statusFile)) {
 }
 foreach ($t in $p.tasks) {
   if (-not $st.ContainsKey($t.id) -or $st[$t.id].state -in @('running','failed')) {
-    $st[$t.id] = [pscustomobject]@{ state = 'pending'; model = $null; started = $null; finished = $null; note = $null }
+    # a task that was running when the pipeline stopped resumes knowing it may be half done
+    $nota = if ($st.ContainsKey($t.id) -and $st[$t.id].state -eq 'running') { 'interrompida' } else { $null }
+    $st[$t.id] = [pscustomobject]@{ state = 'pending'; model = $null; started = $null; finished = $null; note = $nota }
   }
 }
 function Save { $o = [ordered]@{}; foreach ($t in $p.tasks) { $o[$t.id] = $st[$t.id] }; [pscustomobject]$o | ConvertTo-Json -Depth 4 | Set-Content $statusFile -Encoding UTF8 }
@@ -96,6 +98,11 @@ function PromptFor($t, $wt) {
   $txt = Get-Content $path -Raw -Encoding UTF8
   $txt = $txt.Replace('{REPO}', $repo)
   if ($wt) { $txt = $txt.Replace('{WT}', $wt) }
+  if ($st[$t.id].note -eq 'interrompida') {
+    $txt += "`n`nATENCAO - TAREFA RETOMADA: esta tarefa estava em andamento quando o processo parou. Antes de tudo rode git status, git diff --stat e git log -3 (e confira os arquivos da worktree, se houver) para ver o que ja foi feito; continue dali, sem refazer nem apagar o que esta pronto.`n"
+    $prev = Join-Path (Join-Path $logRoot $t.id) 'current.json'
+    if (Test-Path $prev) { try { $c = Get-Content $prev -Raw | ConvertFrom-Json; $txt += "Modelo que estava trabalhando: $($c.worker).`n" } catch {} }
+  }
   $out = Join-Path $logRoot "$($t.id).prompt.md"
   [IO.File]::WriteAllText($out, $txt, $utf8)
   return $out

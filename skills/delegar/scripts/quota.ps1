@@ -3,12 +3,24 @@
 # so it uses the ledger of quota hits written by worker.ps1 plus an optional manual file
 # state\gemini.json  {"usedPercent": 40, "resetsAt": "2026-11-12T03:00:00-03:00", "updated": "..."}
 # Output: JSON with claude/gemini readings and maxParallel. ASCII only (PowerShell 5.1).
-param([switch]$SkipClaudeProbe, [int]$GeminiCooldownHours = 5)
+# -MaxAgeMinutes N: reuse the last reading (state\quota-last.json) if it is younger than N minutes (no new probe).
+param([switch]$SkipClaudeProbe, [int]$GeminiCooldownHours = 5, [int]$MaxAgeMinutes = 0)
 
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $state = Join-Path $env:USERPROFILE '.delegar\state'
 New-Item -ItemType Directory -Force $state | Out-Null
 $now = Get-Date
+$cache = Join-Path $state 'quota-last.json'
+if ($MaxAgeMinutes -gt 0 -and (Test-Path $cache)) {
+  try {
+    $c = Get-Content $cache -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (($now - [datetime]$c.time).TotalMinutes -lt $MaxAgeMinutes) {
+      $c | ConvertTo-Json -Depth 4
+      Write-Output ('recommendedConcurrent=' + $c.recommendedConcurrent)
+      exit 0
+    }
+  } catch {}
+}
 # Which CLIs exist on this PC (a missing provider counts as zero workers).
 $hasClaude = [bool](Get-Command claude -ErrorAction SilentlyContinue)
 $hasAgy = [bool]($env:AGY_BIN -or (Get-Command agy -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $env:USERPROFILE '.gemini\bin\agy.exe')))
@@ -59,10 +71,12 @@ if (Test-Path $manual) {
 
 if (-not $hasAgy) { $gemini.source = 'not installed'; $gemini.maxParallel = 0 }
 
-[pscustomobject]@{ time = $now.ToString('s'); claude = $claude; gemini = $gemini; opencode = [ordered]@{ installed = $hasOpencode } } | ConvertTo-Json -Depth 4
-
 $total = [Math]::Min(3, $gemini.maxParallel + $claude.maxParallel)
 # PC with only the free models (opencode): they are the normal chain there, not a "desperate" fallback.
 if (-not $hasClaude -and -not $hasAgy -and $hasOpencode) { $total = 2 }
+$leitura = [pscustomobject]@{ time = $now.ToString('s'); claude = $claude; gemini = $gemini; opencode = [ordered]@{ installed = $hasOpencode }; recommendedConcurrent = $total }
+$json = $leitura | ConvertTo-Json -Depth 4
+[IO.File]::WriteAllText($cache, $json, (New-Object Text.UTF8Encoding $false))   # workers read this between probes
+$json
 Write-Output ('recommendedConcurrent=' + $total)
 exit 0

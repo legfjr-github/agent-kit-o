@@ -8,7 +8,11 @@ param(
   [Parameter(Mandatory=$true)][string]$Cwd,
   [Parameter(Mandatory=$true)][string]$LogDir,
   [string[]]$Chain = @('agy:gemini-3.8-flash-high','claude:sonnet','claude:haiku'),
-  [int]$TimeoutSeconds = 0
+  [int]$TimeoutSeconds = 0,
+  # Handoff: while a Claude model works, read the Claude quota every N minutes; at HandoffAt (5-hour window)
+  # or 0.95 (weekly) stop it and pass the task, with a summary of what was done, to the next non-Claude model.
+  [double]$HandoffAt = 0.85,
+  [int]$QuotaCheckMinutes = 10
 )
 
 $ErrorActionPreference = 'Continue'
@@ -35,6 +39,37 @@ $quotaRe = '(?i)(quota|rate[ _-]?limit|RESOURCE_EXHAUSTED|\b429\b|usage limit|li
 $base = Get-Content $PromptFile -Raw -Encoding UTF8
 $resumeNote = "`n`nATENCAO: um modelo anterior comecou esta tarefa e parou por falta de cota. Antes de tudo, rode git status e git log -3, veja o que ja foi feito e continue dali, sem refazer nem apagar o trabalho pronto.`n"
 
+# Last actions of a Claude stream-json log, to brief the next model on a handoff.
+function ResumoAcoes($outFile, $max = 40) {
+  if (-not (Test-Path $outFile)) { return '' }
+  $acoes = New-Object System.Collections.Generic.List[string]
+  $ultimoTexto = ''
+  foreach ($l in (Get-Content $outFile -Encoding UTF8)) {
+    if ($l -notmatch '"type"\s*:\s*"assistant"') { continue }
+    try { $j = $l | ConvertFrom-Json } catch { continue }
+    foreach ($b in @($j.message.content)) {
+      if ($b.type -eq 'tool_use') {
+        $alvo = @($b.input.file_path, $b.input.command, $b.input.pattern, $b.input.path) | Where-Object { $_ } | Select-Object -First 1
+        $alvo = ([string]$alvo) -replace '\s+', ' '
+        if ($alvo.Length -gt 160) { $alvo = $alvo.Substring(0, 160) }
+        $acoes.Add("- $($b.name): $alvo")
+      } elseif ($b.type -eq 'text' -and $b.text) { $ultimoTexto = [string]$b.text }
+    }
+  }
+  $ini = [Math]::Max(0, $acoes.Count - $max)
+  $txt = ($acoes.GetRange($ini, $acoes.Count - $ini) -join "`n")
+  if ($ultimoTexto.Length -gt 1500) { $ultimoTexto = $ultimoTexto.Substring($ultimoTexto.Length - 1500) }
+  return "Ultimas acoes ($($acoes.Count) no total):`n$txt`n`nUltima mensagem do modelo anterior:`n$ultimoTexto"
+}
+
+function ClaudeQuota {
+  try {
+    & (Join-Path $PSScriptRoot 'quota.ps1') -MaxAgeMinutes ([Math]::Max(1, $QuotaCheckMinutes - 1)) 2>$null | Out-Null
+    $q = Get-Content (Join-Path $env:USERPROFILE '.delegar\state\quota-last.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    return $q.claude
+  } catch { return $null }
+}
+
 # Final answer of a JSON-lines log: Claude stream-json ("result" event) or opencode json ("text" parts).
 function FinalText($kind, $outFile) {
   if (-not (Test-Path $outFile)) { return @{ text = ''; isError = $false } }
@@ -60,12 +95,15 @@ function FinalText($kind, $outFile) {
 $attempts = @()
 $ok = $false
 $i = 0
+$pularAte = 0        # after a handoff, skip the remaining Claude entries
+$notaHandoff = $null
 foreach ($entry in $Chain) {
   $i++
+  if ($i -lt $pularAte) { continue }
   $kind, $model = $entry.Split(':', 2)
   $effort = $null
   if ($model -match '^(.+)@(low|medium|high|xhigh|max)$') { $model = $Matches[1]; $effort = $Matches[2] }
-  $prompt = if ($i -gt 1) { $base + $resumeNote } else { $base }
+  $prompt = if ($notaHandoff) { $base + $notaHandoff } elseif ($i -gt 1) { $base + $resumeNote } else { $base }
   $tag = ($model -replace '[^A-Za-z0-9.-]', '_')
   $out = Join-Path $LogDir "$i-$tag.out.log"
   $err = Join-Path $LogDir "$i-$tag.err.log"
@@ -79,18 +117,49 @@ foreach ($entry in $Chain) {
     if ($effort) { $effArgs = @('--effort', $effort) }
     $arg = '--print=' + $prompt.Replace('"', '\"')
     & $agy --model $model @effArgs --dangerously-skip-permissions --print-timeout "$($TimeoutSeconds)s" --add-dir $Cwd $arg 1> $out 2> $err
+    $code = $LASTEXITCODE
   } elseif ($kind -eq 'claude') {
-    if ($effort) { $effArgs = @('--effort', $effort) }
-    $prompt | & claude -p --model $model @effArgs --dangerously-skip-permissions --output-format stream-json --verbose 1> $out 2> $err
+    # Watched process (not a blocking pipe) so the quota can be read while it works.
+    $pf = Join-Path $LogDir "$i-$tag.prompt.txt"
+    [IO.File]::WriteAllText($pf, $prompt, $utf8)
+    $eff = if ($effort) { "--effort $effort" } else { '' }
+    $linha = "claude -p --model $model $eff --dangerously-skip-permissions --output-format stream-json --verbose < `"$pf`" > `"$out`" 2> `"$err`""
+    $proc = Start-Process cmd.exe -ArgumentList "/d /s /c `"$linha`"" -WindowStyle Hidden -PassThru
+    $null = $proc.Handle    # keeps ExitCode readable in PowerShell 5.1
+    $proximo = 0
+    for ($k = $i; $k -lt $Chain.Count; $k++) { if (-not $Chain[$k].StartsWith('claude:')) { $proximo = $k + 1; break } }
+    $ultimaLeitura = Get-Date
+    $handoff = $null
+    while (-not $proc.WaitForExit(30000)) {
+      if ($proximo -eq 0 -or ((Get-Date) - $ultimaLeitura).TotalMinutes -lt $QuotaCheckMinutes) { continue }
+      $ultimaLeitura = Get-Date
+      $cq = ClaudeQuota
+      if ($cq -and $cq.read -and ([double]$cq.fiveHour -ge $HandoffAt -or [double]$cq.sevenDay -ge 0.95)) {
+        $handoff = "cota do Claude em $([Math]::Round([double]$cq.fiveHour * 100))% (5 h) / $([Math]::Round([double]$cq.sevenDay * 100))% (semana)"
+        & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null
+        break
+      }
+    }
+    if ($handoff) {
+      $resumo = ResumoAcoes $out
+      $notaHandoff = "`n`nATENCAO - CONTINUACAO DE TAREFA: o modelo anterior ($entry) estava fazendo esta tarefa e foi interrompido de proposito porque a $handoff, perto do limite. Voce assume daqui. Antes de tudo rode git status, git diff --stat e git log -3 para ver o que ja foi feito; continue do ponto em que ele parou, sem refazer nem apagar o que esta pronto, e faca o fechamento que a tarefa pede.`n`n$resumo`n"
+      $attempts += [pscustomobject]@{ worker = $entry; exitCode = $null; quota = $true; handoff = $handoff; emptyOutput = $false
+        started = $start.ToString('s'); finished = (Get-Date).ToString('s'); out = $out; err = $err; text = $txt }
+      Ev 'troca' $entry "$handoff; passando a tarefa para $($Chain[$proximo - 1]) com o resumo do que ja foi feito"
+      $pularAte = $proximo
+      continue
+    }
+    $proc.WaitForExit()
+    $code = $proc.ExitCode
   } elseif ($kind -eq 'opencode') {
     # --auto: same trust level as the other providers (they run with --dangerously-skip-permissions).
     if ($effort) { $effArgs = @('--variant', $effort) }
     $prompt | & opencode run --pure --auto --model $model @effArgs --format json --title "delegar $taskId" 1> $out 2> $err
+    $code = $LASTEXITCODE
   } else {
     Ev 'erro' $entry "provedor desconhecido: $kind"
     continue
   }
-  $code = $LASTEXITCODE
 
   $fin = FinalText $kind $out
   $finText = [string]$fin.text

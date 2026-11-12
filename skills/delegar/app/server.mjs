@@ -542,6 +542,8 @@ function poll() {
       p.estado = /RESULTADO: CONCLUIDO/.test(r.summary) ? 'concluido' : 'incompleto';
       p.fim = now();
       p.mensagens.push({ papel: 'sistema', texto: `Execução terminou: ${p.estado}.`, quando: now() });
+      p.retomadasAuto = 0;
+      try { p.resumoFinal = resumoFinal(p, r); p.mensagens.push({ papel: 'resumo', texto: p.resumoFinal, quando: now() }); } catch (e) { console.error('resumo', e); }
       save(p); report(p, r);
       const st = Object.entries(r.status).map(([k, v]) => `${k} ${v.state}${v.model ? ' (' + v.model + ')' : ''}`).join(', ');
       logDiario(p, p.estado === 'concluido' ? 'Concluído' : 'Incompleto', [
@@ -550,12 +552,47 @@ function poll() {
         ...(p.estado === 'concluido' ? [] : ['**Pendências:** ver tarefas não concluídas no relatório; retomar pelo painel ou `cli.mjs retomar`.']),
       ]);
     } else if (!alive(p.pid)) {
-      p.estado = 'interrompido'; p.mensagens.push({ papel: 'sistema', texto: 'O processo do pipeline não está mais rodando. Use Retomar.', quando: now() });
-      save(p); report(p, r);
+      // Pipeline caiu (PC reiniciou, processo encerrado): retoma sozinho até 3 vezes; depois, só manual.
+      const n = (p.retomadasAuto || 0) + 1;
+      if (n <= 3) {
+        p.retomadasAuto = n;
+        p.mensagens.push({ papel: 'sistema', texto: `O processo do pipeline parou sem terminar; retomando sozinho (tentativa ${n} de 3). As tarefas concluídas não são refeitas e a que estava no meio continua de onde parou.`, quando: now() });
+        save(p); evento(p, { tipo: 'pipeline', texto: `retomada automática ${n}/3` });
+        startPipeline(load(p.id), true);
+      } else {
+        p.estado = 'interrompido'; p.mensagens.push({ papel: 'sistema', texto: 'O processo do pipeline parou de novo depois de 3 retomadas automáticas. Veja o log e use Retomar.', quando: now() });
+        save(p); report(p, r);
+      }
     } else if (h !== p.statusHash) {
       p.statusHash = h; save(p); report(p, r);
     }
   }
+}
+
+// ---------- resumo final ----------
+// Texto para a conversa e o relatório: o que cada tarefa entregou, com qual modelo, trocas, falhas e commits.
+function resumoFinal(p, run) {
+  const L = [`Resumo da execução (${p.estado === 'concluido' ? 'concluída' : 'incompleta'}):`];
+  const logs = path.join(pdir(p.id), 'logs');
+  for (const t of p.plano?.tarefas || []) {
+    const st = run.status?.[t.id] || {};
+    const res = lerJson(path.join(logs, t.id, 'result.json')) || {};
+    const tent = res.attempts || [];
+    const trocas = tent.filter((a) => a.handoff || a.quota).map((a) => `${a.worker}${a.handoff ? ' (' + a.handoff + ')' : ' (sem cota)'}`);
+    L.push('', `• ${t.id}${t.titulo ? ' – ' + t.titulo : ''}: ${st.state || '-'}${st.model ? ' com ' + st.model : ''}${st.note ? ' · ' + st.note : ''}`);
+    if (trocas.length) L.push(`  trocas de modelo: ${trocas.join(' → ')}`);
+    const ultimo = tent.length ? tent[tent.length - 1].text : null;
+    let txt = '';
+    try { if (ultimo) txt = fs.readFileSync(ultimo, 'utf8').trim(); } catch {}
+    if (txt) L.push('  ' + (txt.length > 700 ? txt.slice(0, 700) + '…' : txt).replace(/\n+/g, '\n  '));
+  }
+  if (isGitRepo(p.repo) && p.inicio) {
+    try {
+      const out = execFileSync('git', ['-C', p.repo, 'log', `--since=${p.inicio}`, '--format=%h %s', '-15'], { encoding: 'utf8', windowsHide: true, timeout: 8000 }).trim();
+      L.push('', 'Commits desta execução:', out ? out.split('\n').map((l) => '  ' + l).join('\n') : '  nenhum');
+    } catch {}
+  }
+  return L.join('\n');
 }
 
 // ---------- cofre ----------
@@ -585,6 +622,7 @@ function report(p, run) {
       L.push('');
     }
     if (run.summary) L.push('## Resultado', '', run.summary.split('\n').filter((l) => /^RESULTADO/.test(l)).join('\n'), '');
+    if (p.resumoFinal) L.push('## Resumo', '', '```', p.resumoFinal, '```', '');
     L.push(`Logs: \`${path.join(pdir(p.id), 'logs')}\``, '', 'Ver também [[guias_e_comandos/skill_delegar_orquestracao]].', '');
     fs.writeFileSync(path.join(dir, `${p.id}.md`), L.join('\n'), 'utf8');
     indexLine(p);

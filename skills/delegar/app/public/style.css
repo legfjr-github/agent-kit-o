@@ -100,3 +100,4 @@ ul.eventos { max-height: 260px; overflow-y: auto; }
 @media (max-width: 900px) { .duas { grid-template-columns: 1fr; } .top { flex-wrap: wrap; } .provs { order: 5; } }
 .grid > *, .layout > * { min-width: 0; }
 @media (max-width: 900px) { .grid { grid-template-columns: minmax(0, 1fr); } .cab .acoes { width: 100%; } .cab .acoes label { flex: 1 1 140px; } }
+.msg.resumo { background: var(--soft); border-color: var(--accent); }

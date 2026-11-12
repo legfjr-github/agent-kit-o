@@ -248,8 +248,18 @@ def render(text: str, ctx: dict) -> str:
 
 
 def copy_rendered(src: Path, dst: Path, ctx: dict):
+    dst.mkdir(parents=True, exist_ok=True)
     if dst.exists():
-        shutil.rmtree(dst)
+        for f in list(dst.rglob("*")):
+            if "__pycache__" in f.parts:
+                continue
+            if f.is_file():
+                rel = f.relative_to(dst)
+                if not (src / rel).is_file():
+                    try:
+                        f.unlink()
+                    except PermissionError as e:
+                        print(f"    [AVISO] {f}: {e}")
     for f in src.rglob("*"):
         if "__pycache__" in f.parts:
             continue
@@ -260,11 +270,30 @@ def copy_rendered(src: Path, dst: Path, ctx: dict):
         out.parent.mkdir(parents=True, exist_ok=True)
         if f.suffix in TEXT_SUFFIXES:
             try:
-                out.write_text(render(f.read_text(encoding="utf-8"), ctx), encoding="utf-8", newline="")
+                rendered = render(f.read_text(encoding="utf-8"), ctx)
+                if out.is_file():
+                    try:
+                        if out.read_text(encoding="utf-8") == rendered:
+                            continue
+                    except (UnicodeDecodeError, OSError):
+                        pass
+                try:
+                    out.write_text(rendered, encoding="utf-8", newline="")
+                except PermissionError as e:
+                    print(f"    [AVISO] {out}: {e}")
                 continue
             except UnicodeDecodeError:
                 pass
-        shutil.copy2(f, out)
+        if out.is_file():
+            try:
+                if out.stat().st_size == f.stat().st_size and out.read_bytes() == f.read_bytes():
+                    continue
+            except OSError:
+                pass
+        try:
+            shutil.copy2(f, out)
+        except PermissionError as e:
+            print(f"    [AVISO] {out}: {e}")
 
 
 def install_skills(kit: Path, ctx: dict):
@@ -277,7 +306,12 @@ def install_skills(kit: Path, ctx: dict):
         manifest = target / MANIFEST
         previous = set(json.loads(manifest.read_text())) if manifest.exists() else set()
         for name in previous - set(skills):  # skill removida do repositório
-            shutil.rmtree(target / name, ignore_errors=True)
+            p = target / name
+            if p.exists():
+                print(f"    [AVISO] Removendo skill descontinuada: {name} de {target}")
+                shutil.rmtree(p, ignore_errors=True)
+                if p.exists():
+                    print(f"    [AVISO] Não foi possível remover completamente a pasta {p} (em uso?).")
         for name in skills:
             try:
                 copy_rendered(kit / "skills" / name, target / name, ctx)

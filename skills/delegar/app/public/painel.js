@@ -102,7 +102,7 @@ async function carregarLista() {
 function renderMsgs(p) {
   if (p.mensagens.length === ultimoMsgs && !p.ocupado) return;
   const box = $('msgs'); const fim = box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
-  const quem = { usuario: 'Você', planejador: 'Planejador', sistema: 'Sistema' };
+  const quem = { usuario: 'Você', planejador: 'Planejador', sistema: 'Sistema', resumo: 'Resumo da execução' };
   const limpa = (m) => m.papel === 'planejador' ? m.texto.replace(/```json[\s\S]*?```/g, '[plano em JSON: veja a tabela em "Plano e divisão"]') : m.texto;
   box.replaceChildren(...p.mensagens.map((m) => el('div', { class: 'msg ' + m.papel }, el('span', { class: 'quem', text: `${quem[m.papel] || m.papel}${m.modelo ? ' (' + m.modelo + ')' : ''} · ${new Date(m.quando).toLocaleString('pt-BR')}` }), limpa(m))));
   if (p.ocupado) box.append(el('div', { class: 'pensando', text: 'O planejador está pensando… (pode levar alguns minutos)' }));

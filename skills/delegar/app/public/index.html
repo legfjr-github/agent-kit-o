@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="delegar-token" content="__TOKEN__">
+<title>Delegar</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <h1>Delegar</h1>
+  <span class="sub">planejar com um modelo, executar com vários agentes</span>
+  <span id="provs" class="provs"></span>
+  <button id="btnAtividade">Atividade <span id="ativBadge" class="contador hidden"></span></button>
+  <button id="btnNovo" class="primary">Novo projeto</button>
+</header>
+<div class="layout">
+  <aside id="lista" class="lista"></aside>
+  <main id="main">
+    <section id="vazio" class="card vazio">
+      <h2>Nenhum projeto aberto</h2>
+      <p>Crie um projeto, descreva o trabalho e converse com o planejador. Quando o plano estiver bom, aprove; ou marque <strong>confiar no orquestrador</strong> para ele planejar e iniciar sozinho.</p>
+      <div id="modosInfo" class="modos"></div>
+    </section>
+
+    <section id="novo" class="card hidden">
+      <h2>Novo projeto</h2>
+      <label>Título <input id="nTitulo" maxlength="120" placeholder="opcional; o planejador sugere um"></label>
+      <label>Repositório (pasta local) <input id="nRepo" placeholder="C:\Users\...\projeto" required></label>
+      <div class="duas">
+        <label>Modo <select id="nModo"></select></label>
+        <label>Acompanhamento <select id="nSup"></select></label>
+      </div>
+      <p id="nModoDesc" class="hint"></p>
+      <p id="nSupDesc" class="hint"></p>
+      <details id="nModelosBox"><summary>Ver e mudar os modelos deste modo</summary><div id="nEditor"></div></details>
+      <label>Pedido <textarea id="nPedido" rows="7" placeholder="Descreva o trabalho: objetivo, escopo, o que já existe, o que publicar no fim."></textarea></label>
+      <label class="check"><input type="checkbox" id="nAuto"> Confiar no orquestrador: planejar e iniciar sem aprovação</label>
+      <div class="row"><button id="nCriar" class="primary">Criar e enviar ao planejador</button><button id="nCancelar">Cancelar</button></div>
+      <p id="nErro" class="erro"></p>
+    </section>
+
+    <section id="atividade" class="hidden">
+      <div class="card"><h2>Atividade agora</h2><p class="hint">Quem está fazendo o quê em todos os projetos em andamento. Atualiza a cada 4 segundos.</p></div>
+      <div id="ativLista"></div>
+    </section>
+
+    <section id="proj" class="hidden">
+      <div class="card cab">
+        <div>
+          <h2 id="pTitulo"></h2>
+          <div class="meta"><span id="pEstado" class="badge"></span> <span id="pDesesp" class="badge desespero hidden">modo desespero ativo</span> <span id="pRepo" class="mono"></span></div>
+          <p id="pPlanejador" class="hint"></p>
+        </div>
+        <div class="acoes">
+          <label>Modo <select id="pModo"></select></label>
+          <label>Acompanhamento <select id="pSup"></select></label>
+          <button id="pModelos">Modelos</button>
+          <button id="pAprovar" class="primary">Aprovar e iniciar</button>
+          <button id="pRetomar">Retomar</button>
+          <button id="pCancelar" class="perigo">Cancelar execução</button>
+        </div>
+      </div>
+
+      <div id="pGates" class="hidden"></div>
+
+      <div id="pEditorBox" class="card hidden">
+        <h3>Modelos do modo</h3>
+        <p class="hint">A ordem é a de reserva: se o primeiro ficar sem cota, o próximo continua. Mudar qualquer modelo transforma o modo em <strong>Personalizado</strong>. Os dois melhores modelos gratuitos entram sozinhos no fim de cada cadeia como última reserva.</p>
+        <div id="pEditor"></div>
+        <div class="row"><button id="pSalvarModo" class="primary">Salvar como personalizado</button><button id="pFecharEditor">Fechar</button></div>
+        <p id="pEditorErro" class="erro"></p>
+      </div>
+
+      <div id="pAtivBox" class="card hidden">
+        <h3>Atividade</h3>
+        <div id="pAtiv"></div>
+      </div>
+
+      <div class="grid">
+        <div class="card chat">
+          <h3>Conversa com o planejador</h3>
+          <div id="msgs" class="msgs"></div>
+          <div class="enviar">
+            <textarea id="pMsg" rows="3" placeholder="Ajuste o escopo, responda perguntas ou peça mudanças no plano."></textarea>
+            <div class="row"><button id="pEnviar" class="primary">Enviar</button><button id="pGerar">Gerar plano final</button></div>
+          </div>
+        </div>
+
+        <div class="card plano">
+          <h3>Plano e divisão</h3>
+          <p id="planoResumo" class="hint">Ainda sem plano.</p>
+          <div id="divisao" class="divisao"></div>
+          <div class="tabwrap"><table id="tarefas"><thead><tr><th>Tarefa</th><th>Tipo</th><th>Nível</th><th>Modelos</th><th>Depende</th><th>Estado</th></tr></thead><tbody></tbody></table></div>
+          <p id="verify" class="hint"></p>
+          <details><summary>Log do pipeline</summary><pre id="log" class="log"></pre></details>
+          <p class="hint">Relatório no cofre: <span id="relatorio" class="mono"></span></p>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+<script src="/painel.js"></script>
+</body>
+</html>

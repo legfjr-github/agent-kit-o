@@ -204,10 +204,10 @@ async function runOpencode({ cwd, model, effort, prompt, resume }) {
   return text ? { ok: true, text, session } : { ok: false, text: (erros.join(' ') || r.err || r.out || 'sem resposta').slice(-3000) };
 }
 
-// agy sem --dangerously-skip-permissions: no modo headless ele nega o que pediria permissão (gravar, rodar comando).
+// agy com --dangerously-skip-permissions (o planejador continua proibido de editar pelo planner.md).
 async function runAgy({ cwd, model, effort, prompt }) {
   const exe = detectar().agy;
-  const args = ['--model', model, '--input-format', 'stream-json', '--output-format', 'stream-json', '--disable-slash-commands', '--add-dir', cwd];
+  const args = ['--model', model, '--input-format', 'stream-json', '--output-format', 'stream-json', '--dangerously-skip-permissions', '--disable-slash-commands', '--add-dir', cwd];
   if (fs.existsSync(VAULT)) args.push('--add-dir', VAULT);
   if (effort) args.push('--effort', effort);
   args.push('-p=');

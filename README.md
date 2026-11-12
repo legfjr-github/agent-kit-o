@@ -4,9 +4,9 @@ Kit para trabalhar com agentes de IA (Claude Code, Antigravity/Gemini, opencode,
 
 - **Cofre de conhecimento** (Markdown, compatível com Obsidian) que todos os agentes leem e atualizam: índice, log diário, próximos passos e notas por projeto.
 - **Orquestrador `delegar`**: um modelo forte planeja, modelos mais baratos executam em paralelo, com troca automática quando a cota acaba, modo com modelos gratuitos, paradas para confirmação e tela de atividade. Ajusta-se às CLIs instaladas no PC.
-- **Skills**: `delegar` (orquestrador), `knowledge-vault-manager` (cofre), `humanizer` (escrita sem cara de IA) e `sistemas-com-ia` (criar sistemas que usam IA pela API ou pelas CLIs locais).
+- **Skills**: `delegar` (orquestrador), `knowledge-vault-manager` (cofre), `humanizer` (escrita sem cara de IA) e `sistemas-com-ia` (criar sistemas que usam IA pela API ou pelas CLIs locais) e `automacao-web` (robôs de navegador com undetected-chromedriver, que anotam o passo a passo de cada site no cofre para reaproveitar).
 - **Regras globais** para todas as IAs: como usar o kit, consulta e atualização do cofre, segurança por padrão, redação humana.
-- **Cofre de exemplo** com padrões prontos: checklist de segurança e testes de ataque, padrões de testes, sistemas com integração de IA, executáveis com Nuitka, interfaces com PyQt6, uso do orquestrador.
+- **Cofre de exemplo** com padrões prontos: checklist de segurança e testes de ataque, padrões de testes, sistemas com integração de IA, automação web e mapas de site (com o login gov.br), executáveis com Nuitka, interfaces com PyQt6, uso do orquestrador.
 
 Nenhum dado pessoal ou projeto vem junto: o cofre começa vazio, só com os guias.
 
@@ -24,7 +24,7 @@ O instalador:
 1. Usa o Python, Git e Node que já existirem. O que faltar baixa em versão portátil (zip oficial) para `%USERPROFILE%\agent-kit-tools`, confere a assinatura digital e o SHA-256 e põe no PATH do usuário.
 2. Instala Claude Code, opencode e Gemini CLI pelo npm (instalação completa; `install.py --minimo` pula). O Antigravity (que traz a CLI `agy`) é instalado à parte, em https://antigravity.google.
 3. Clona o kit em `%USERPROFILE%\agent-kit` e põe skills e regras em **todas as IAs do PC**: Claude Code, Antigravity, Gemini CLI, opencode e a pasta comum `~/.agents`, e também Codex, Qwen Code, Windsurf e Cursor quando estiverem instalados, trocando os caminhos pelos desta máquina.
-4. Corrige servidores MCP do opencode que apontem para executáveis inexistentes.
+4. Deixa o `undetected-chromedriver` (padrão das automações web, necessário para gov.br e sites parecidos) sempre instalado, com o Chrome, e corrige servidores MCP do opencode que apontem para executáveis inexistentes.
 5. Pergunta se deve **mapear os projetos do PC** e criar uma nota para cada um no cofre.
 6. Dá acesso fácil ao orquestrador: atalho **"Orquestrador de IA (Delegar)"** na área de trabalho, favorito com o mesmo nome na barra do Chrome (todos os perfis; se o Chrome estiver aberto, avisa para fechar e rodar `python install.py --atalhos`) e início automático do painel com o Windows (pasta Inicializar), para o favorito sempre funcionar. No fim, abre o painel e mostra um resumo de como usar.
 

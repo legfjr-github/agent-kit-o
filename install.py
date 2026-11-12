@@ -504,6 +504,46 @@ def favorito_chrome(user_data: Path) -> list:
     return feitos
 
 
+PACOTES_AUTOMACAO = ["undetected-chromedriver", "selenium", "setuptools"]  # setuptools: distutils no Python 3.12+
+
+
+def chrome_instalado() -> bool:
+    if not WINDOWS:
+        return bool(shutil.which("google-chrome") or shutil.which("chrome"))
+    import winreg
+    for raiz in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(raiz, r"Software\Google\Chrome\BLBeacon"):
+                return True
+        except OSError:
+            pass
+    locais = [Path(os.environ.get(v, "")) / "Google" / "Chrome" / "Application" / "chrome.exe"
+              for v in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")]
+    return any(p.exists() for p in locais)
+
+
+def garantir_automacao(args):
+    """undetected-chromedriver sempre instalado (padrão das automações do kit) e Chrome presente."""
+    if args.verificar or args.minimo:
+        return
+    py = sys.executable
+    teste = subprocess.run([py, "-c", "import undetected_chromedriver, selenium"], capture_output=True, text=True)
+    if teste.returncode != 0:
+        info("Instalando undetected-chromedriver e selenium (automação web)")
+        r = subprocess.run([py, "-m", "pip", "install", "-U", *PACOTES_AUTOMACAO], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        ok = subprocess.run([py, "-c", "import undetected_chromedriver"], capture_output=True).returncode == 0
+        print("    ok" if ok else "    [AVISO] não instalou: " + (r.stderr or r.stdout)[-400:].strip()
+              + f"\n    Rode: \"{py}\" -m pip install -U {' '.join(PACOTES_AUTOMACAO)}")
+    if not chrome_instalado():
+        if WINDOWS and shutil.which("winget") and not args.silencioso:
+            info("Instalando o Google Chrome (as automações usam o Chrome com undetected-chromedriver)")
+            subprocess.run(["winget", "install", "-e", "--id", "Google.Chrome", "--accept-source-agreements",
+                            "--accept-package-agreements", "--silent"], check=False)
+        else:
+            print("    [AVISO] Google Chrome não encontrado; as automações web precisam dele (https://www.google.com/chrome).")
+
+
 def abrir_painel(lanc: Path):
     """Sobe o painel e abre o navegador nele, sem prender o instalador."""
     subprocess.Popen(["cmd", "/c", str(lanc)], creationflags=0x08000000)
@@ -571,7 +611,7 @@ MARCAS = {
 }
 LIBS = {"react": "React", "vue": "Vue", "next": "Next.js", "express": "Express", "hono": "Hono", "vite": "Vite",
         "django": "Django", "fastapi": "FastAPI", "flask": "Flask", "pyqt6": "PyQt6", "pyside6": "PySide6", "nuitka": "Nuitka",
-        "playwright": "Playwright", "selenium": "Selenium", "pandas": "pandas", "electron": "Electron", "streamlit": "Streamlit"}
+        "playwright": "Playwright", "selenium": "Selenium", "undetected-chromedriver": "undetected-chromedriver", "pandas": "pandas", "electron": "Electron", "streamlit": "Streamlit"}
 
 
 def eh_projeto(d: Path):
@@ -652,7 +692,91 @@ def descrever(d: Path):
                 par.append(s)
             resumo = " ".join(par)[:500]
             break
-    return {"stack": stack, "libs": libs, "git": g, "resumo": resumo}
+    return {"stack": stack, "libs": libs, "git": g, "resumo": resumo, "automacao": automacao_do_projeto(d)}
+
+
+# Só import de verdade (não basta a palavra aparecer num texto).
+AUTO_RE = re.compile(r"^\s*(?:import|from)\s+(undetected_chromedriver|selenium|playwright|pyautogui|seleniumbase)\b"
+                     r"|(?:require\(|from\s+)['\"](puppeteer|playwright|selenium-webdriver)['\"]", re.M)
+CONFIG_RE = re.compile(r"(config|settings|constantes?|urls?)\.(py|js|ts|json|toml|ya?ml)$|^\.env\.example$", re.I)
+URL_RE = re.compile(r"https?://([a-z0-9][a-z0-9.-]*\.[a-z]{2,})", re.I)
+DOMINIOS_IGNORADOS = re.compile(r"(^|\.)(googleapis\.com|gstatic\.com|jsdelivr\.net|unpkg\.com|cdnjs\.cloudflare\.com|w3\.org|omg\.org|"
+                                r"github\.com|githubusercontent\.com|pypi\.org|python\.org|npmjs\.(com|org)|example\.(com|org)|"
+                                r"schemas\.|bpmn\.io|mozilla\.org|microsoft\.com|chromium\.org|googlechromelabs|stackoverflow\.com|"
+                                r"localhost|readthedocs)|\.(test|local|example|invalid|localhost)$", re.I)
+
+
+def automacao_do_projeto(d: Path, limite=400):
+    """Se o código usa automação de navegador: ferramentas e domínios citados nos arquivos que automatizam."""
+    ferramentas, dominios, arquivos, configs = set(), {}, [], []
+    vistos = 0
+    if (d / "install.py").exists() and (d / "skills").is_dir():
+        return None  # o próprio agent-kit
+    for f in d.rglob("*"):
+        if any(p in PULAR or p.startswith(".") for p in f.relative_to(d).parts[:-1]):
+            continue
+        if CONFIG_RE.search(f.name) and f.is_file():
+            configs.append(f)
+        if f.suffix.lower() not in {".py", ".js", ".ts", ".mjs"} or not f.is_file():
+            continue
+        vistos += 1
+        if vistos > limite:
+            break
+        try:
+            txt = f.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        achou = {(m.group(1) or m.group(2)).lower() for m in AUTO_RE.finditer(txt)}
+        if not achou:
+            continue
+        ferramentas |= {"undetected-chromedriver" if "undetected" in a else "Selenium" if "selenium" in a
+                        else "Playwright" if "playwright" in a else "pyautogui" if "pyautogui" in a else "Puppeteer" for a in achou}
+        arquivos.append(f.relative_to(d).as_posix())
+        for dom in URL_RE.findall(txt):
+            dom = dom.lower().rstrip(".")
+            if not DOMINIOS_IGNORADOS.search(dom):
+                dominios[dom] = dominios.get(dom, 0) + 1
+    if not ferramentas:
+        return None
+    for f in configs[:20]:  # URL base costuma ficar na configuração
+        try:
+            for dom in URL_RE.findall(f.read_text(encoding="utf-8", errors="ignore")):
+                dom = dom.lower().rstrip(".")
+                if not DOMINIOS_IGNORADOS.search(dom):
+                    dominios[dom] = dominios.get(dom, 0) + 1
+        except OSError:
+            pass
+    return {"ferramentas": sorted(ferramentas), "dominios": [k for k, _ in sorted(dominios.items(), key=lambda x: -x[1])[:8]],
+            "arquivos": arquivos[:10]}
+
+
+def esboco_mapa_site(vault: Path, dominio: str, projeto: Path, arquivos: list) -> bool:
+    """Cria automacoes/sites/<dominio>.md a partir do modelo (se ainda não existir) e põe no índice de sites."""
+    pasta = vault / "automacoes" / "sites"
+    nota = pasta / f"{dominio}.md"
+    criada = False
+    if not nota.exists():
+        pasta.mkdir(parents=True, exist_ok=True)
+        modelo = pasta / "_modelo_site.md"
+        base = modelo.read_text(encoding="utf-8") if modelo.exists() else "# 🗺️ <dominio>\n"
+        base = base.replace("<dominio>", dominio).replace("AAAA-MM-DD", datetime.now().strftime("%Y-%m-%d"))
+        pend = (f"\n> **Pendente (gerado pelo instalador):** transcrever para este mapa os passos que o projeto `{projeto}` já executa"
+                f" neste site. Arquivos com automação: {', '.join('`' + a + '`' for a in arquivos[:6])}.\n")
+        base = base.replace("\n## Entrada", pend + "\n## Entrada", 1)
+        nota.write_text(base, encoding="utf-8")
+        criada = True
+    indice = vault / "automacoes" / "00_MAPA_DE_SITES.md"
+    if not indice.exists():
+        indice.parent.mkdir(parents=True, exist_ok=True)
+        indice.write_text("# 🕹️ Mapa de sites automatizados\n\nRegras: [[guias_e_comandos/automacao_web]].\n\n"
+                          "| Site | Mapa | Login | Fluxos mapeados | Projetos |\n|---|---|---|---|---|\n", encoding="utf-8")
+    s = indice.read_text(encoding="utf-8")
+    if f"[[automacoes/sites/{dominio}]]" not in s:
+        linha = f"| {dominio} | [[automacoes/sites/{dominio}]] | a mapear | a mapear (esboço) | {projeto.name} |"
+        partes = s.split("\n<!--", 1)
+        s = partes[0].rstrip("\n") + "\n" + linha + "\n" + ("\n<!--" + partes[1] if len(partes) > 1 else "")
+        indice.write_text(s, encoding="utf-8")
+    return criada
 
 
 def slug(s):
@@ -676,6 +800,7 @@ def mapear_projetos(vault: Path, kit: Path):
     hoje = datetime.now().strftime("%d/%m/%Y")
     ini, fim = "<!-- agent-kit:mapa:inicio -->", "<!-- agent-kit:mapa:fim -->"
     linhas_mapa, novos, atualizados = [], 0, 0
+    projetos_auto, sites_novos = 0, 0
     usados = set()
     # notas do cofre que já citam cada pasta (para ligar o mapa ao que já foi escrito)
     textos = {}
@@ -699,6 +824,15 @@ def mapear_projetos(vault: Path, kit: Path):
         tecs = list(dict.fromkeys(dsc["stack"] + dsc["libs"]))
         alvos = {str(p).lower(), str(p).lower().replace("\\", "/"), str(p).lower().replace("\\", "\\\\")}
         relacionadas = sorted((k for k, t in textos.items() if any(a in t for a in alvos)), key=lambda k: (k[:1].isdigit(), k))[:8]
+        auto = dsc.get("automacao")
+        linha_auto = []
+        if auto:
+            projetos_auto += 1
+            for dom in auto["dominios"]:
+                sites_novos += esboco_mapa_site(vault, dom, p, auto["arquivos"])
+            sites = ", ".join(f"[[automacoes/sites/{d}]]" for d in auto["dominios"]) or "nenhum domínio no código"
+            linha_auto = [f"- **Automação web:** {', '.join(auto['ferramentas'])}; sites: {sites}. "
+                          f"Antes de mexer, siga [[guias_e_comandos/automacao_web]] e mantenha o mapa de cada site atualizado."]
         bloco = "\n".join([ini,
             f"- **Caminho:** `{p}`",
             f"- **Tecnologias:** {', '.join(tecs) or 'não identificadas'}",
@@ -706,6 +840,7 @@ def mapear_projetos(vault: Path, kit: Path):
             (f"- **Git:** {g.get('remoto') or 'sem remoto'} · branch `{g.get('branch', '-')}` · último commit: {g.get('ultimo') or '-'}"
              + (f" · {g['pendentes']} arquivos alterados sem commit" if g.get("pendentes") else "")) if g else "- **Git:** não é repositório git",
             f"- **Descrição (README):** {dsc['resumo'] or 'sem README'}",
+            *linha_auto,
             f"- **Mapeado em:** {hoje}, pelo instalador do agent-kit. Rodar `install.py --mapear` atualiza este bloco.",
             fim])
         nota = pasta / f"{nome}.md"
@@ -736,7 +871,8 @@ def mapear_projetos(vault: Path, kit: Path):
         s = log.read_text(encoding="utf-8")
         entrada = (f"### 📌 Instalador do agent-kit: mapa de projetos do PC\n"
                    f"- **Adicionado:** {novos} notas novas em `projetos/mapa_pc/`; {atualizados} atualizadas; mapa em [[projetos/00_mapa_de_projetos]] ({len(linhas_mapa)} projetos).\n"
-                   f"- **Pendências:** completar objetivo e decisões nas notas novas.\n\n")
+                   + (f"- **Automação:** {projetos_auto} projetos com automação web; {sites_novos} esboços de mapa de site criados em `automacoes/sites/` ([[automacoes/00_MAPA_DE_SITES]]).\n" if projetos_auto else "")
+                   + f"- **Pendências:** completar objetivo e decisões nas notas novas" + ("; transcrever os passos das automações para os mapas de site" if sites_novos else "") + ".\n\n")
         cab = f"## 📅 {hoje}"
         if cab in s:
             i = s.index(cab) + len(cab)
@@ -745,7 +881,8 @@ def mapear_projetos(vault: Path, kit: Path):
             sep = s.find("\n---\n")
             s = (s[:sep + 5] + f"\n{cab}\n\n{entrada}" + s[sep + 5:].lstrip()) if sep >= 0 else f"{cab}\n\n{entrada}{s}"
         log.write_text(s, encoding="utf-8")
-    info(f"Mapa de projetos: {len(linhas_mapa)} projetos ({novos} notas novas, {atualizados} atualizadas) em {pasta}")
+    info(f"Mapa de projetos: {len(linhas_mapa)} projetos ({novos} notas novas, {atualizados} atualizadas) em {pasta}"
+         + (f"; {projetos_auto} com automação web, {sites_novos} mapas de site novos" if projetos_auto else ""))
     return len(linhas_mapa)
 
 
@@ -792,6 +929,7 @@ def main():
     info("Regras")
     install_rules(kit, ctx)
     preparar_delegar(ctx)
+    garantir_automacao(args)
 
     if args.mapear or (not args.nao_mapear and not args.silencioso and perguntar(
             "Mapear os projetos deste PC (pastas com .git ou arquivos de projeto em Documentos, Desktop, source, repos...)"

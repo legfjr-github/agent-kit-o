@@ -93,6 +93,15 @@ function Install-Python {
     $dest = Join-Path $T 'python'
     Expand-Fresh $zip $dest
     Assert-Signed (Join-Path $dest 'python.exe') 'Python Software Foundation'
+    # The embeddable package has no pip: enable site-packages and bootstrap pip (needed for undetected-chromedriver).
+    Get-ChildItem $dest -Filter 'python*._pth' | ForEach-Object {
+      (Get-Content $_.FullName) -replace '^#\s*import site', 'import site' | Set-Content $_.FullName -Encoding ascii
+    }
+    $gp = Join-Path $env:TEMP 'get-pip.py'
+    Get-Verified 'https://bootstrap.pypa.io/get-pip.py' $gp $null
+    & (Join-Path $dest 'python.exe') $gp --no-warn-script-location
+    Remove-Item $gp -Force
+    Add-UserPath (Join-Path $dest 'Scripts')
     return (Join-Path $dest 'python.exe')
   }
   throw 'Nao achei um Python 3.12/3.13 portatil no python.org.'

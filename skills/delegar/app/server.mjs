@@ -16,8 +16,15 @@ const PORT = Number(process.env.DELEGAR_PORT) || 8790;
 const HOME = os.homedir();
 const DATA = process.env.DELEGAR_DATA || path.join(HOME, '.delegar');
 const PROJ = path.join(DATA, 'projects');
-let VAULT = process.env.DELEGAR_VAULT || '{{VAULT_PATH}}';
-if (VAULT.includes('{{')) VAULT = path.join(HOME, 'Documents', 'agent-kit', 'vault');
+// Cofre: variável de ambiente, depois o ambiente.json gravado pelo install.py, depois o caminho preenchido
+// na instalação (String.raw: as barras invertidas do Windows não podem virar escapes de JS).
+function cofre() {
+  if (process.env.DELEGAR_VAULT) return process.env.DELEGAR_VAULT;
+  try { const v = JSON.parse(fs.readFileSync(path.join(DATA, 'ambiente.json'), 'utf8')).vault; if (v && fs.existsSync(v)) return v; } catch {}
+  const instalado = String.raw`{{VAULT_PATH}}`;
+  return instalado.includes('{{') ? path.join(HOME, 'Documents', 'agent-kit', 'vault') : instalado;
+}
+const VAULT = cofre();
 fs.mkdirSync(PROJ, { recursive: true });
 const TOKEN_FILE = path.join(DATA, 'token');
 if (!fs.existsSync(TOKEN_FILE)) fs.writeFileSync(TOKEN_FILE, crypto.randomBytes(24).toString('hex'));

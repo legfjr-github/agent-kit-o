@@ -29,7 +29,8 @@ node SKILL\app\cli.mjs status | retomar <id> | cancelar <id> | modo <id> <modo> 
 
 - Sem `--auto`: o planejador conversa e propõe; mostre ao usuário a divisão (`ver`) e só rode `aprovar` quando ele aprovar, ou quando ele disser para confiar.
 - Com `--auto`: o planejador não pergunta, gera o plano e a execução começa sozinha.
-- O painel sobe sozinho no primeiro comando da CLI. O usuário acompanha e aprova em http://127.0.0.1:8790 (conversa, plano, modelos por tarefa, editor de modelos, acompanhamento, confirmações, atividade ao vivo, log).
+- Abrir o painel: o usuário dá dois cliques em `SKILL\iniciar-painel.bat` (ou no atalho "Orquestrador de IA (Delegar)", ou na pasta Inicializar com `--sem-navegador`). Se o painel estiver fora do ar, peça isso a ele. O primeiro comando da CLI também sobe o painel, mas aí ele fica preso à sessão do agente e cai quando a sessão ou o app fecham (caso de 13/11/2026). Logs: `%USERPROFILE%\.delegar\startup.log` e `server.log` (com data e hora; sem a linha "painel saiu", o processo foi encerrado de fora).
+- O usuário acompanha e aprova em http://127.0.0.1:8790 (conversa, plano, modelos por tarefa, editor de modelos, acompanhamento, confirmações, atividade ao vivo, log).
 - Pedido longo: grave num arquivo e use `--arquivo <caminho>`.
 - Confirmação pendente: não confirme no lugar do usuário. Mostre o motivo e pergunte; só rode `confirmar` com a resposta dele.
 

@@ -485,7 +485,13 @@ def pasta_shell(nome: str, padrao: Path) -> Path:
 
 
 def criar_lancador() -> Path:
-    """Script que sobe o painel (se não estiver no ar) e abre o navegador nele."""
+    """Script que sobe o painel (se não estiver no ar) e abre o navegador nele.
+
+    Usa o iniciar-painel.bat da skill (acha o node, grava startup.log). O painel aberto por uma sessão
+    de agente cai quando a sessão ou o app fecham; por isso o acesso normal é por este lançador."""
+    bat = HOME / ".claude" / "skills" / "delegar" / "iniciar-painel.bat"
+    if bat.is_file():
+        return bat
     cli = HOME / ".claude" / "skills" / "delegar" / "app" / "cli.mjs"
     node = achar("node") or "node"
     lanc = HOME / ".delegar" / "abrir-painel.cmd"

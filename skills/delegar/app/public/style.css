@@ -152,3 +152,33 @@ ul.eventos { max-height: 260px; overflow-y: auto; }
 @media (max-width: 700px) {
   .cota { grid-template-columns: 1fr; }
 }
+
+/* ---------- uso e custo ---------- */
+.uso-secao { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; min-width: 0; }
+.uso-secao h3 { margin: 0 0 10px; font-size: 15px; }
+.uso-filtro { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin-bottom: 12px; }
+.uso-filtro > * { flex: 1 1 180px; min-width: 0; }
+.uso-filtro label { margin: 0; }
+.uso-filtro select, .uso-filtro input { margin-top: 4px; }
+.uso-rolagem { display: block; width: 100%; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.uso-tabela { width: 100%; border-collapse: collapse; font-size: 13px; }
+.uso-tabela th, .uso-tabela td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.uso-tabela th { font-size: 12px; font-weight: 600; color: var(--muted); }
+.uso-tabela td.num, .uso-tabela th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.uso-total td, .uso-total th { font-weight: 700; border-top: 2px solid var(--ink); border-bottom: 0; }
+.uso-nota { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+.uso-origem { display: inline-block; margin-left: 4px; padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; background: var(--soft); color: var(--muted); font-size: 11px; line-height: 16px; white-space: nowrap; vertical-align: middle; }
+.uso-origem.cli { color: var(--accent); border-color: var(--accent); }
+.uso-origem.tabela { color: var(--ok); border-color: var(--ok); }
+.uso-origem.aproximado { color: var(--warn); border-color: var(--warn); }
+.uso-origem.estimado { color: var(--warn); border-color: var(--warn); border-style: dashed; }
+.uso-origem.gratuito { color: var(--ok); border-color: var(--ok); border-style: dashed; }
+.uso-origem.desconhecido { color: var(--muted); border-style: dashed; }
+.uso-origem.assinatura { color: var(--accent); border-color: var(--accent); border-style: dotted; }
+.uso-precos { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; font-size: 13px; color: var(--muted); }
+.uso-precos button { padding: 4px 10px; font-size: 13px; }
+.uso-vivo { font-size: 12px; color: var(--muted); opacity: .55; }
+@media (max-width: 480px) {
+  .uso-secao { padding: 12px; }
+  .uso-filtro > * { flex-basis: 100%; }
+}

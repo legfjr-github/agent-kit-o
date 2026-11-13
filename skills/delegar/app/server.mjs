@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { entradaValida, QUOTA_RE, DESESPERO, adaptar, catalogo, detectar, desesperoEfetivo, iniciarDescoberta } from './modelos.mjs';
 import { criarPerfis, validarNome } from './perfis.mjs';
 import { linhasDeCotas, cotasDoProjeto } from './cotas.mjs';
+import { modeloSemEsforco, usoClaudeJson, usoOpencode, usoAgyStream, estimar, usoDaTentativa } from './uso.mjs';
+import { carregarPrecos, custoUsd, assinaturaDe, emBrl, idadeDias, atualizarPrecos, atualizarSeVencido } from './precos.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -114,7 +116,7 @@ function validarCustom(c) {
     if (LISTAS_TOPO.includes(k)) out[k] = [...new Set(lista)]; else out.tiers[k] = [...new Set(lista)];
   }
   const mc = Number(c.maxConcurrent);
-  out.maxConcurrent = Number.isInteger(mc) && mc >= 1 && mc <= 4 ? mc : 2;
+  out.maxConcurrent = Number.isInteger(mc) && mc >= 1 && mc <= 6 ? mc : 2;
   return { errs, custom: out };
 }
 // Converte um modo pronto em personalizado (volume alternado vira a primeira cadeia).
@@ -189,7 +191,7 @@ function coletar(ch, entrada, limiteMs, onLine) {
 const LIMITE_PLANEJADOR = 40 * 60000;
 const instrucoes = () => fs.readFileSync(PLANNER_FILE, 'utf8');
 
-async function runClaude({ cwd, model, effort, prompt, resume, bare }) {
+async function runClaude({ cwd, model, effort, prompt, resume, bare, entry }) {
   const args = ['/d', '/c', 'claude', '-p', '--model', model, '--output-format', 'json',
     '--dangerously-skip-permissions', '--disallowedTools', 'Edit,Write,NotebookEdit'];
   if (!bare) args.push('--append-system-prompt-file', PLANNER_FILE);
@@ -197,45 +199,60 @@ async function runClaude({ cwd, model, effort, prompt, resume, bare }) {
   if (resume) args.push('--resume', resume);
   const r = await coletar(spawn('cmd.exe', args, { cwd, windowsHide: true }), prompt, LIMITE_PLANEJADOR);
   const line = r.out.trim().split(/\r?\n/).filter((l) => l.startsWith('{')).pop();
-  try { const j = JSON.parse(line); return { ok: !j.is_error, text: j.result || '', session: j.session_id }; }
-  catch { return { ok: false, text: (r.err || r.out || 'sem resposta').slice(-3000) }; }
+  const m = entry || `claude:${model}`;
+  try {
+    const j = JSON.parse(line);
+    const uso = usoClaudeJson(j, m);
+    return { ok: !j.is_error, text: j.result || '', session: j.session_id, uso };
+  }
+  catch {
+    const uso = usoClaudeJson(r.out, m);
+    return { ok: false, text: (r.err || r.out || 'sem resposta').slice(-3000), uso };
+  }
 }
 
 // opencode com o agente "plan" (não edita). O planner.md vai no começo do primeiro prompt.
-async function runOpencode({ cwd, model, effort, prompt, resume, bare }) {
+async function runOpencode({ cwd, model, effort, prompt, resume, bare, entry }) {
   const args = ['/d', '/c', 'opencode', 'run', '--pure', '--agent', 'plan', '--model', model, '--format', 'json', '--title', 'Delegar planejamento'];
   if (effort) args.push('--variant', effort);
   if (resume) args.push('--session', resume);
-  const parts = []; let session = null; const erros = [];
+  const parts = []; let session = null; const erros = []; const evs = [];
   const r = await coletar(spawn('cmd.exe', args, { cwd, windowsHide: true }), resume || bare ? prompt : instrucoes() + '\n\n---\n\n' + prompt, LIMITE_PLANEJADOR, (l) => {
     try {
       const e = JSON.parse(l); session = e.sessionID || session;
+      evs.push(e);
       if (e.type === 'text' && e.part?.text) parts.push(e.part.text);
       if (e.type === 'error') erros.push(JSON.stringify(e.error || e).slice(0, 1000));
     } catch {}
   });
   const text = parts.join('\n').trim();
-  return text ? { ok: true, text, session } : { ok: false, text: (erros.join(' ') || r.err || r.out || 'sem resposta').slice(-3000) };
+  const m = entry || `opencode:${model}`;
+  const uso = usoOpencode(evs.length ? evs : r.out, m);
+  return text ? { ok: true, text, session, uso } : { ok: false, text: (erros.join(' ') || r.err || r.out || 'sem resposta').slice(-3000), uso };
 }
 
 // agy com --dangerously-skip-permissions (o planejador continua proibido de editar pelo planner.md).
-async function runAgy({ cwd, model, effort, prompt, bare }) {
+async function runAgy({ cwd, model, effort, prompt, bare, entry }) {
   const exe = detectar().agy;
   const args = ['--model', model, '--input-format', 'stream-json', '--output-format', 'stream-json', '--dangerously-skip-permissions', '--disable-slash-commands', '--add-dir', cwd];
   if (fs.existsSync(VAULT)) args.push('--add-dir', VAULT);
   if (effort) args.push('--effort', effort);
   args.push('-p=');
-  const buffer = []; let final = {};
-  const line = JSON.stringify({ event: 'user', message: { content: bare ? prompt : instrucoes() + '\n\n---\n\n' + prompt } }) + '\n';
+  const buffer = []; let final = {}; const evs = [];
+  const promptCompleto = bare ? prompt : instrucoes() + '\n\n---\n\n' + prompt;
+  const line = JSON.stringify({ event: 'user', message: { content: promptCompleto } }) + '\n';
   const r = await coletar(spawn(exe, args, { cwd, windowsHide: true }), line, LIMITE_PLANEJADOR, (l) => {
     try {
       const e = JSON.parse(l);
+      evs.push(e);
       if (e.event === 'step_update' && e.step_update?.step_type === 'agent_response' && e.step_update.text_delta) buffer.push(e.step_update.text_delta);
       if (e.event === 'result') final = e.result || {};
     } catch {}
   });
   const text = String(final.response || buffer.join('')).trim();
-  return text ? { ok: true, text } : { ok: false, text: (r.err || r.out || 'sem resposta').slice(-3000) };
+  const m = entry || `agy:${model}`;
+  const uso = usoAgyStream(evs.length ? evs : r.out, m, { prompt: promptCompleto });
+  return text ? { ok: true, text, uso } : { ok: false, text: (r.err || r.out || 'sem resposta').slice(-3000), uso };
 }
 
 function introducao(p) {
@@ -265,7 +282,11 @@ async function chamarPlanejador(p, texto) {
     const prompt = mesmo ? texto : primeiro ? introducao(p) + (texto !== p.pedido ? '\n\n' + texto : '') : transcricao(p, texto);
     const run = prov === 'claude' ? runClaude : prov === 'opencode' ? runOpencode : runAgy;
     evento(p, { tipo: 'planejador', modelo: entry, texto: 'planejador pensando' });
-    const r = await run({ cwd: p.repo, model, effort, prompt, resume: mesmo ? p.sessao : null });
+    const r = await run({ cwd: p.repo, model, effort, prompt, resume: mesmo ? p.sessao : null, entry });
+    if (!p.uso || typeof p.uso !== 'object') p.uso = { chamadas: [] };
+    if (!Array.isArray(p.uso.chamadas)) p.uso.chamadas = [];
+    p.uso.chamadas.push({ quando: horaLocal(), papel: 'planejador', ...(r.uso || null) });
+    save(p);
     ultimo = { ...r, entry, avisos };
     if (r.ok || !QUOTA_RE.test(r.text)) return ultimo;
     avisos.push(`Planejador ${entry} sem cota; tentando o próximo modelo.`);
@@ -330,7 +351,11 @@ async function corrigirJson(p, bruto, erro) {
     const run = pv === 'claude' ? runClaude : pv === 'opencode' ? runOpencode : runAgy;
     evento(p, { tipo: 'planejador', modelo: entry, texto: 'corrigindo o JSON do plano' });
     try {
-      const r = await run({ cwd: p.repo, model, effort, prompt, bare: true });
+      const r = await run({ cwd: p.repo, model, effort, prompt, bare: true, entry });
+      if (!p.uso || typeof p.uso !== 'object') p.uso = { chamadas: [] };
+      if (!Array.isArray(p.uso.chamadas)) p.uso.chamadas = [];
+      p.uso.chamadas.push({ quando: horaLocal(), papel: 'corretor', ...(r.uso || null) });
+      save(p);
       if (!r.ok) continue;
       const x = extractPlan(r.text);
       if (x.plan) return { plan: x.plan, entry };
@@ -422,6 +447,17 @@ async function plannerTurn(p, userText, { gerar = false } = {}) {
 }
 
 // ---------- execução ----------
+// Quantas tarefas ao mesmo tempo. No automático (confiar no orquestrador ou acompanhamento automático) vale o
+// número que o planejador pediu, até LIMITE_PARALELO, porque lotes independentes terminam mais cedo; no manual
+// fica o limite do modo escolhido. Em todos os casos o pipeline ainda corta pela cota (quota.ps1).
+const LIMITE_PARALELO = 6;
+function paralelismo(p, m) {
+  const pedido = Number(p.plano?.maxConcurrent);
+  const modo = Number(m.maxConcurrent) || 2;
+  if ((p.auto || supDe(p) === 'automatico') && Number.isInteger(pedido) && pedido >= 1) return Math.min(pedido, LIMITE_PARALELO);
+  return Math.max(1, Math.min(Number.isInteger(pedido) && pedido >= 1 ? pedido : modo, modo));
+}
+
 function buildPlanFile(p) {
   const m = cfgDe(p);
   const dir = pdir(p.id), pr = path.join(dir, 'prompts');
@@ -450,7 +486,7 @@ function buildPlanFile(p) {
     name: p.id, repo: p.repo, worktreeRoot: p.repo + '-wt', logDir: path.join(dir, 'logs'),
     chain: comReserva(adaptar(vol0)), fixChain: comReserva(adaptar(m.fix)), coordinatorChain: comReserva(adaptar(m.coord)),
     desperateChain: adaptar(desesperoEfetivo(), []), supervision: supDe(p),
-    maxConcurrent: Math.max(1, Math.min(Number(p.plano.maxConcurrent) || m.maxConcurrent, m.maxConcurrent)),
+    maxConcurrent: paralelismo(p, m),
     maxRecoveries: 2, verify: (p.plano.verify || []).filter((v) => typeof v === 'string' && v.trim()), tasks,
   };
   const pf = path.join(dir, 'plan.json');
@@ -486,7 +522,7 @@ function startPipeline(p, resume = false) {
   p.estado = 'executando';
   if (!resume) p.inicio = now();
   p.fim = null;
-  p.mensagens.push({ papel: 'sistema', texto: resume ? 'Execução retomada.' : `Execução iniciada (modo ${nomeModo(p)}, acompanhamento ${supDe(p)}).`, quando: now() });
+  p.mensagens.push({ papel: 'sistema', texto: resume ? 'Execução retomada.' : `Execução iniciada (modo ${nomeModo(p)}, acompanhamento ${supDe(p)}, até ${paralelismo(p, cfgDe(p))} tarefas ao mesmo tempo, conforme a cota).`, quando: now() });
   save(p);
   report(p);
   if (!resume) logDiario(p, 'Iniciado', [`**Iniciado:** execução do plano (${p.plano.tarefas.length} tarefas, modo ${nomeModo(p)}) em \`${p.repo}\`.`]);
@@ -649,11 +685,542 @@ function poll() {
   }
 }
 
+// ---------- uso de tokens e custos ----------
+const PROVEDORES_USO = ['claude', 'agy', 'opencode'];
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+const numOuNull = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const arred = (v) => (v === null ? null : Math.round(v * 1e6) / 1e6);
+
+function partesModelo(entry, provPadrao) {
+  const s = modeloSemEsforco(entry);
+  const i = s.indexOf(':');
+  if (i > 0 && PROVEDORES_USO.includes(s.slice(0, i))) return { provedor: s.slice(0, i), modelo: s.slice(i + 1) };
+  return { provedor: provPadrao || 'desconhecido', modelo: s };
+}
+
+const PESO_ORIGEM = { desconhecido: 5, estimado: 4, aproximado: 3, tabela: 2, gratuito: 1, cli: 0 };
+function piorOrigem(origens) {
+  let pior = 'cli';
+  let maxPeso = -1;
+  for (const o of origens) {
+    if (!o) continue;
+    const p = PESO_ORIGEM[o] ?? 2;
+    if (p > maxPeso) {
+      maxPeso = p;
+      pior = o;
+    }
+  }
+  return pior;
+}
+
+const cacheArquivosUso = new Map();
+function comCacheArquivo(caminho, fn) {
+  if (!caminho) return null;
+  try {
+    const st = fs.statSync(caminho);
+    const chave = `${path.resolve(caminho)}:${st.mtimeMs}:${st.size}`;
+    if (cacheArquivosUso.has(chave)) return cacheArquivosUso.get(chave);
+    const val = fn(caminho, st);
+    if (cacheArquivosUso.size > 2000) cacheArquivosUso.clear();
+    cacheArquivosUso.set(chave, val);
+    return val;
+  } catch {
+    return null;
+  }
+}
+
+function lerResultJsonComCache(arquivo) {
+  return comCacheArquivo(arquivo, () => lerJson(arquivo));
+}
+
+function dadosUsoDoProjeto(p, tabela) {
+  tabela = tabela || carregarPrecos({ dataDir: DATA });
+  const logsDir = path.join(pdir(p.id), 'logs');
+  const run = readRun(p);
+  const st = run.status || {};
+
+  // 1. Pseudotarefa 'planejador'
+  const chamadas = Array.isArray(p?.uso?.chamadas) ? p.uso.chamadas : [];
+  const tentativasPlan = [];
+  const planTotal = { entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0, usd: 0, brl: 0, aproximado: false, origem: 'cli' };
+  const planOrigens = [];
+
+  for (const ch of chamadas) {
+    if (!ch || typeof ch !== 'object') continue;
+    const { provedor: chProv, modelo: chMod } = partesModelo(ch.modelo || 'desconhecido');
+    const linhas = Array.isArray(ch.porModelo) && ch.porModelo.length ? ch.porModelo : [{
+      provedor: chProv,
+      modelo: chMod,
+      entrada: num(ch.entrada),
+      saida: num(ch.saida),
+      cacheLido: num(ch.cacheLido),
+      cacheGravado: num(ch.cacheGravado),
+      custoCliUsd: numOuNull(ch.custoCliUsd)
+    }];
+
+    let chUsd = 0;
+    let chTemUsd = false;
+    const chOrigens = [];
+    const linhasComCusto = [];
+    for (const l of linhas) {
+      const c = custoUsd(tabela, l);
+      let o = c.origem;
+      if (ch.fonte === 'estimado' && o !== 'desconhecido') o = 'estimado';
+      chOrigens.push(o);
+      if (c.usd !== null) { chUsd += c.usd; chTemUsd = true; }
+      linhasComCusto.push({ ...l, usd: c.usd, origem: o });
+    }
+    const finalOrigem = piorOrigem(chOrigens);
+    const finalUsd = chTemUsd ? arred(chUsd) : null;
+
+    tentativasPlan.push({
+      modelo: chMod,
+      provedor: chProv,
+      entrada: num(ch.entrada),
+      saida: num(ch.saida),
+      cacheLido: num(ch.cacheLido),
+      cacheGravado: num(ch.cacheGravado),
+      usd: finalUsd,
+      origem: finalOrigem,
+      fonte: ch.fonte || 'cli',
+      inicio: ch.quando || null,
+      fim: ch.quando || null,
+      porModelo: linhasComCusto
+    });
+
+    planTotal.entrada += num(ch.entrada);
+    planTotal.saida += num(ch.saida);
+    planTotal.cacheLido += num(ch.cacheLido);
+    planTotal.cacheGravado += num(ch.cacheGravado);
+    if (finalUsd !== null) planTotal.usd = (planTotal.usd || 0) + finalUsd;
+    planOrigens.push(finalOrigem);
+  }
+  planTotal.usd = arred(planTotal.usd);
+  planTotal.brl = planTotal.usd !== null ? emBrl(tabela, planTotal.usd) : null;
+  planTotal.origem = piorOrigem(planOrigens);
+  planTotal.aproximado = planOrigens.some((o) => o === 'aproximado' || o === 'estimado');
+
+  const tarefaPlan = {
+    id: 'planejador',
+    titulo: 'Planejador',
+    estado: p.plano ? 'done' : (p.estado === 'planejando' ? 'running' : 'done'),
+    total: planTotal,
+    tentativas: tentativasPlan
+  };
+
+  // 2. Tarefas do plano
+  const tarefasOut = [tarefaPlan];
+  const tarefasPlano = Array.isArray(p?.plano?.tarefas) ? p.plano.tarefas : [];
+
+  for (const t of tarefasPlano) {
+    const tState = st[t.id]?.state || 'pending';
+    const ld = path.join(logsDir, t.id);
+    const ldFix = path.join(logsDir, `${t.id}-fix`);
+    const tentativasTarefa = [];
+    const tOrigens = [];
+    const tTotal = { entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0, usd: 0, brl: 0, aproximado: false, origem: 'cli' };
+
+    const processarDir = (dir) => {
+      if (!fs.existsSync(dir)) return;
+      const resFile = path.join(dir, 'result.json');
+      const res = fs.existsSync(resFile) ? lerResultJsonComCache(resFile) : null;
+      const attempts = Array.isArray(res?.attempts) ? res.attempts : [];
+      const completedIndices = new Set();
+
+      for (let idx = 0; idx < attempts.length; idx++) {
+        const a = attempts[idx];
+        completedIndices.add(idx + 1);
+        const uso = a.uso || (a.out ? comCacheArquivo(a.out, () => {
+          const pf = a.prompt || a.promptFile || a.out.replace(/\.out\.log$/, '.prompt.txt');
+          return usoDaTentativa({
+            tipo: a.worker?.split(':')[0],
+            modelo: a.worker,
+            out: a.out,
+            prompt: pf,
+            texto: a.text
+          });
+        }) : null);
+
+        const { provedor, modelo } = partesModelo(a.worker || 'desconhecido');
+        const linhas = Array.isArray(uso?.porModelo) && uso.porModelo.length ? uso.porModelo : [{
+          provedor,
+          modelo,
+          entrada: num(uso?.entrada),
+          saida: num(uso?.saida),
+          cacheLido: num(uso?.cacheLido),
+          cacheGravado: num(uso?.cacheGravado),
+          custoCliUsd: numOuNull(uso?.custoCliUsd)
+        }];
+
+        let attUsd = 0;
+        let attTemUsd = false;
+        const attOrigens = [];
+        const linhasComCusto = [];
+        for (const l of linhas) {
+          const c = custoUsd(tabela, l);
+          let o = c.origem;
+          if (uso?.fonte === 'estimado' && o !== 'desconhecido') o = 'estimado';
+          attOrigens.push(o);
+          if (c.usd !== null) { attUsd += c.usd; attTemUsd = true; }
+          linhasComCusto.push({ ...l, usd: c.usd, origem: o });
+        }
+        const finalOrigem = piorOrigem(attOrigens);
+        const finalUsd = attTemUsd ? arred(attUsd) : null;
+
+        tentativasTarefa.push({
+          modelo,
+          provedor,
+          entrada: num(uso?.entrada),
+          saida: num(uso?.saida),
+          cacheLido: num(uso?.cacheLido),
+          cacheGravado: num(uso?.cacheGravado),
+          usd: finalUsd,
+          origem: finalOrigem,
+          fonte: uso?.fonte || 'cli',
+          inicio: a.started || null,
+          fim: a.finished || null,
+          porModelo: linhasComCusto
+        });
+
+        tTotal.entrada += num(uso?.entrada);
+        tTotal.saida += num(uso?.saida);
+        tTotal.cacheLido += num(uso?.cacheLido);
+        tTotal.cacheGravado += num(uso?.cacheGravado);
+        if (finalUsd !== null) tTotal.usd = (tTotal.usd || 0) + finalUsd;
+        tOrigens.push(finalOrigem);
+      }
+
+      // Tentativa em andamento (.out.log ainda não listado no result.json)
+      const outs = fs.readdirSync(dir).filter((f) => /^\d+-.*\.out\.log$/.test(f))
+        .sort((x, y) => parseInt(x) - parseInt(y));
+      for (const f of outs) {
+        const numTent = parseInt(f);
+        if (completedIndices.has(numTent)) continue;
+        const outPath = path.join(dir, f);
+        const curFile = path.join(dir, 'current.json');
+        const cur = fs.existsSync(curFile) ? lerJson(curFile) : null;
+        const workerEntry = (cur && cur.attempt === numTent && cur.worker) ? cur.worker : (() => {
+          const m = f.match(/^\d+-(.*)\.out\.log$/);
+          return m ? m[1].replace(/_/g, '-') : 'desconhecido';
+        })();
+        const pfPath = path.join(dir, f.replace(/\.out\.log$/, '.prompt.txt'));
+        const txtPath = path.join(dir, f.replace(/\.out\.log$/, '.txt'));
+
+        const uso = comCacheArquivo(outPath, () => {
+          let u = usoDaTentativa({
+            tipo: workerEntry.split(':')[0],
+            modelo: workerEntry,
+            out: outPath,
+            prompt: pfPath,
+            texto: txtPath
+          });
+          if (!u) {
+            let pLen = 0, oLen = 0;
+            try { pLen = fs.statSync(pfPath).size; } catch {}
+            try { oLen = fs.statSync(outPath).size; } catch {}
+            if (pLen > 0 || oLen > 0) u = estimar(pLen, oLen, workerEntry);
+          }
+          return u;
+        });
+
+        const fonteTent = uso?.fonte === 'cli' ? 'cli-parcial' : (uso?.fonte || 'cli-parcial');
+        const { provedor, modelo } = partesModelo(workerEntry);
+        const linhas = Array.isArray(uso?.porModelo) && uso.porModelo.length ? uso.porModelo : [{
+          provedor,
+          modelo,
+          entrada: num(uso?.entrada),
+          saida: num(uso?.saida),
+          cacheLido: num(uso?.cacheLido),
+          cacheGravado: num(uso?.cacheGravado),
+          custoCliUsd: numOuNull(uso?.custoCliUsd)
+        }];
+
+        let attUsd = 0;
+        let attTemUsd = false;
+        const attOrigens = [];
+        const linhasComCusto = [];
+        for (const l of linhas) {
+          const c = custoUsd(tabela, l);
+          let o = c.origem;
+          if (fonteTent === 'estimado' && o !== 'desconhecido') o = 'estimado';
+          attOrigens.push(o);
+          if (c.usd !== null) { attUsd += c.usd; attTemUsd = true; }
+          linhasComCusto.push({ ...l, usd: c.usd, origem: o });
+        }
+        const finalOrigem = piorOrigem(attOrigens);
+        const finalUsd = attTemUsd ? arred(attUsd) : null;
+
+        tentativasTarefa.push({
+          modelo,
+          provedor,
+          entrada: num(uso?.entrada),
+          saida: num(uso?.saida),
+          cacheLido: num(uso?.cacheLido),
+          cacheGravado: num(uso?.cacheGravado),
+          usd: finalUsd,
+          origem: finalOrigem,
+          fonte: fonteTent,
+          inicio: (cur && cur.started) ? cur.started : (st[t.id]?.started || null),
+          fim: null,
+          porModelo: linhasComCusto
+        });
+
+        tTotal.entrada += num(uso?.entrada);
+        tTotal.saida += num(uso?.saida);
+        tTotal.cacheLido += num(uso?.cacheLido);
+        tTotal.cacheGravado += num(uso?.cacheGravado);
+        if (finalUsd !== null) tTotal.usd = (tTotal.usd || 0) + finalUsd;
+        tOrigens.push(finalOrigem);
+      }
+    };
+
+    processarDir(ld);
+    if (fs.existsSync(ldFix)) processarDir(ldFix);
+
+    tTotal.usd = arred(tTotal.usd);
+    tTotal.brl = tTotal.usd !== null ? emBrl(tabela, tTotal.usd) : null;
+    tTotal.origem = piorOrigem(tOrigens);
+    tTotal.aproximado = tOrigens.some((o) => o === 'aproximado' || o === 'estimado');
+
+    tarefasOut.push({
+      id: t.id,
+      titulo: t.titulo || '',
+      estado: tState,
+      total: tTotal,
+      tentativas: tentativasTarefa
+    });
+  }
+
+  // 3. Totais do projeto e agregação por modelo
+  const projTotal = { entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0, usd: 0, brl: 0, aproximado: false, origem: 'cli' };
+  const projOrigens = [];
+  const modelosMap = new Map();
+
+  for (const tf of tarefasOut) {
+    projTotal.entrada += tf.total.entrada;
+    projTotal.saida += tf.total.saida;
+    projTotal.cacheLido += tf.total.cacheLido;
+    projTotal.cacheGravado += tf.total.cacheGravado;
+    if (tf.total.usd !== null) projTotal.usd = (projTotal.usd || 0) + tf.total.usd;
+    if (tf.total.origem) projOrigens.push(tf.total.origem);
+
+    for (const tent of tf.tentativas) {
+      const linhas = Array.isArray(tent.porModelo) && tent.porModelo.length ? tent.porModelo : [{
+        provedor: tent.provedor,
+        modelo: tent.modelo,
+        entrada: tent.entrada,
+        saida: tent.saida,
+        cacheLido: tent.cacheLido,
+        cacheGravado: tent.cacheGravado,
+        usd: tent.usd,
+        origem: tent.origem
+      }];
+
+      for (const l of linhas) {
+        const chave = `${l.provedor}:${l.modelo}`;
+        let mEntry = modelosMap.get(chave);
+        if (!mEntry) {
+          mEntry = {
+            provedor: l.provedor,
+            modelo: l.modelo,
+            entrada: 0,
+            saida: 0,
+            cacheLido: 0,
+            cacheGravado: 0,
+            usd: 0,
+            origens: [],
+            fontes: [],
+            assinatura: assinaturaDe(l.provedor)
+          };
+          modelosMap.set(chave, mEntry);
+        }
+        mEntry.entrada += l.entrada;
+        mEntry.saida += l.saida;
+        mEntry.cacheLido += l.cacheLido;
+        mEntry.cacheGravado += l.cacheGravado;
+        mEntry.origens.push(l.origem || tent.origem);
+        mEntry.fontes.push(tent.fonte);
+        if (l.usd !== null) mEntry.usd = (mEntry.usd || 0) + l.usd;
+      }
+    }
+  }
+
+  projTotal.usd = arred(projTotal.usd);
+  projTotal.brl = projTotal.usd !== null ? emBrl(tabela, projTotal.usd) : null;
+  projTotal.origem = piorOrigem(projOrigens);
+  projTotal.aproximado = projOrigens.some((o) => o === 'aproximado' || o === 'estimado');
+
+  const modelosOut = Array.from(modelosMap.values()).map((m) => {
+    const usd = arred(m.usd);
+    return {
+      provedor: m.provedor,
+      modelo: m.modelo,
+      entrada: m.entrada,
+      saida: m.saida,
+      cacheLido: m.cacheLido,
+      cacheGravado: m.cacheGravado,
+      usd,
+      brl: usd !== null ? emBrl(tabela, usd) : null,
+      origem: piorOrigem(m.origens),
+      assinatura: m.assinatura,
+      estimado: m.origens.some((o) => o === 'estimado') || m.fontes.some((f) => f === 'estimado')
+    };
+  }).sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0) || (b.entrada + b.saida) - (a.entrada + a.saida));
+
+  const emAndamento = p.estado === 'executando' || tarefasOut.some((t) => t.estado === 'running');
+
+  return {
+    emAndamento,
+    total: projTotal,
+    modelos: modelosOut,
+    tarefas: tarefasOut
+  };
+}
+
+function dadosUsoPublico(p, tabela) {
+  const dados = dadosUsoDoProjeto(p, tabela);
+  const tarefas = dados.tarefas.map((tf) => ({
+    id: tf.id,
+    titulo: tf.titulo,
+    estado: tf.estado,
+    total: tf.total,
+    tentativas: tf.tentativas.map(({ porModelo: _pm, ...rest }) => rest)
+  }));
+  return {
+    emAndamento: dados.emAndamento,
+    total: dados.total,
+    modelos: dados.modelos,
+    tarefas
+  };
+}
+
+function noPeriodo(dtStr, periodo, agora = new Date()) {
+  if (periodo === 'tudo') return true;
+  if (!dtStr) return false;
+  const t = new Date(dtStr).getTime();
+  if (Number.isNaN(t)) return false;
+  if (periodo === 'hoje') {
+    const inicioHoje = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate()).getTime();
+    return t >= inicioHoje;
+  }
+  if (periodo === '7d') {
+    return t >= agora.getTime() - 7 * 86400000;
+  }
+  if (periodo === '30d') {
+    return t >= agora.getTime() - 30 * 86400000;
+  }
+  return false;
+}
+
+function respostaUsoGeral(periodo, tabela) {
+  tabela = tabela || carregarPrecos({ dataDir: DATA });
+  const todos = listAll();
+  const modelosMap = new Map();
+  const totGeral = { entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0, usd: 0, brl: 0, aproximado: false };
+  const origensGerais = [];
+  const projetosNoPeriodo = new Set();
+  const agora = new Date();
+
+  for (const p of todos) {
+    const dados = dadosUsoDoProjeto(p, tabela);
+    let projetoTeveNoPeriodo = false;
+
+    for (const tf of dados.tarefas) {
+      for (const tent of tf.tentativas) {
+        const dataRef = tent.fim || tent.inicio;
+        if (!noPeriodo(dataRef, periodo, agora)) continue;
+        projetoTeveNoPeriodo = true;
+
+        totGeral.entrada += tent.entrada;
+        totGeral.saida += tent.saida;
+        totGeral.cacheLido += tent.cacheLido;
+        totGeral.cacheGravado += tent.cacheGravado;
+        if (tent.usd !== null) totGeral.usd = (totGeral.usd || 0) + tent.usd;
+        if (tent.origem) origensGerais.push(tent.origem);
+
+        const linhas = Array.isArray(tent.porModelo) && tent.porModelo.length ? tent.porModelo : [{
+          provedor: tent.provedor,
+          modelo: tent.modelo,
+          entrada: tent.entrada,
+          saida: tent.saida,
+          cacheLido: tent.cacheLido,
+          cacheGravado: tent.cacheGravado,
+          usd: tent.usd,
+          origem: tent.origem
+        }];
+
+        for (const l of linhas) {
+          const chave = `${l.provedor}:${l.modelo}`;
+          let m = modelosMap.get(chave);
+          if (!m) {
+            m = {
+              provedor: l.provedor,
+              modelo: l.modelo,
+              entrada: 0,
+              saida: 0,
+              cacheLido: 0,
+              cacheGravado: 0,
+              usd: 0,
+              origens: [],
+              fontes: [],
+              assinatura: assinaturaDe(l.provedor)
+            };
+            modelosMap.set(chave, m);
+          }
+          m.entrada += l.entrada;
+          m.saida += l.saida;
+          m.cacheLido += l.cacheLido;
+          m.cacheGravado += l.cacheGravado;
+          if (l.usd !== null) m.usd = (m.usd || 0) + l.usd;
+          m.origens.push(l.origem || tent.origem);
+          m.fontes.push(tent.fonte);
+        }
+      }
+    }
+    if (projetoTeveNoPeriodo) projetosNoPeriodo.add(p.id);
+  }
+
+  totGeral.usd = arred(totGeral.usd);
+  totGeral.brl = totGeral.usd !== null ? emBrl(tabela, totGeral.usd) : null;
+  totGeral.aproximado = origensGerais.some((o) => o === 'aproximado' || o === 'estimado');
+
+  const modelos = Array.from(modelosMap.values()).map((m) => {
+    const usd = arred(m.usd);
+    return {
+      provedor: m.provedor,
+      modelo: m.modelo,
+      entrada: m.entrada,
+      saida: m.saida,
+      cacheLido: m.cacheLido,
+      cacheGravado: m.cacheGravado,
+      usd,
+      brl: usd !== null ? emBrl(tabela, usd) : null,
+      origem: piorOrigem(m.origens),
+      assinatura: m.assinatura,
+      estimado: m.origens.some((o) => o === 'estimado') || m.fontes.some((f) => f === 'estimado')
+    };
+  }).sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0) || (b.entrada + b.saida) - (a.entrada + a.saida));
+
+  return {
+    periodo,
+    precosAtualizados: tabela.atualizado || null,
+    usdBrl: tabela.usdBrl ?? null,
+    modelos,
+    total: totGeral,
+    projetos: projetosNoPeriodo.size,
+    aviso: 'Claude Code e Antigravity são assinaturas: o custo é o equivalente em API.'
+  };
+}
+
 // ---------- resumo final ----------
 // Texto para a conversa e o relatório: o que cada tarefa entregou, com qual modelo, trocas, falhas e commits.
 function resumoFinal(p, run) {
   const L = [`Resumo da execução (${p.estado === 'concluido' ? 'concluída' : 'incompleta'}):`];
   const logs = path.join(pdir(p.id), 'logs');
+  const tabela = carregarPrecos({ dataDir: DATA });
+  const usoProj = dadosUsoDoProjeto(p, tabela);
+  const mapaTarefas = Object.fromEntries(usoProj.tarefas.map((t) => [t.id, t]));
+
   for (const t of p.plano?.tarefas || []) {
     const st = run.status?.[t.id] || {};
     const res = lerJson(path.join(logs, t.id, 'result.json')) || {};
@@ -661,6 +1228,14 @@ function resumoFinal(p, run) {
     const trocas = tent.filter((a) => a.handoff || a.quota).map((a) => `${a.worker}${a.handoff ? ' (' + a.handoff + ')' : ' (sem cota)'}`);
     L.push('', `• ${t.id}${t.titulo ? ' – ' + t.titulo : ''}: ${st.state || '-'}${st.model ? ' com ' + st.model : ''}${st.note ? ' · ' + st.note : ''}`);
     if (trocas.length) L.push(`  trocas de modelo: ${trocas.join(' → ')}`);
+
+    const tUso = mapaTarefas[t.id];
+    if (tUso) {
+      const u = tUso.total;
+      const usdStr = u.usd !== null ? u.usd.toFixed(4) : '-';
+      L.push(`  tokens: entrada ${u.entrada}, saida ${u.saida}, cache lido ${u.cacheLido}, cache gravado ${u.cacheGravado} · ~US$ ${usdStr} (${u.origem})`);
+    }
+
     const ultimo = tent.length ? tent[tent.length - 1].text : null;
     let txt = '';
     try { if (ultimo) txt = fs.readFileSync(ultimo, 'utf8').trim(); } catch {}
@@ -672,6 +1247,20 @@ function resumoFinal(p, run) {
       L.push('', 'Commits desta execução:', out ? out.split('\n').map((l) => '  ' + l).join('\n') : '  nenhum');
     } catch {}
   }
+
+  const planUso = mapaTarefas['planejador'];
+  if (planUso) {
+    const u = planUso.total;
+    const usdStr = u.usd !== null ? u.usd.toFixed(4) : '-';
+    const brlStr = u.brl !== null ? ` (R$ ${u.brl.toFixed(2)})` : '';
+    L.push('', `Planejador: tokens: entrada ${u.entrada}, saida ${u.saida}, cache lido ${u.cacheLido}, cache gravado ${u.cacheGravado} · ~US$ ${usdStr}${brlStr} (${u.origem})`);
+  }
+  const tot = usoProj.total;
+  const totUsdStr = tot.usd !== null ? tot.usd.toFixed(4) : '-';
+  const totBrlStr = tot.brl !== null ? ` (R$ ${tot.brl.toFixed(2)})` : '';
+  L.push(`Total da execucao: tokens: entrada ${tot.entrada}, saida ${tot.saida}, cache lido ${tot.cacheLido}, cache gravado ${tot.cacheGravado} · ~US$ ${totUsdStr}${totBrlStr} (${tot.origem})`);
+  L.push('Claude Code e Antigravity sao assinaturas: o custo e o equivalente em API.');
+
   return L.join('\n');
 }
 
@@ -702,6 +1291,37 @@ function report(p, run) {
       L.push('');
     }
     if (run.summary) L.push('## Resultado', '', run.summary.split('\n').filter((l) => /^RESULTADO/.test(l)).join('\n'), '');
+
+    const tabela = carregarPrecos({ dataDir: DATA });
+    const dadosUso = dadosUsoDoProjeto(p, tabela);
+    L.push('## Tokens e custo', '');
+    if (dadosUso.modelos.length) {
+      L.push('### Por modelo', '',
+        '| Modelo | Provedor | Entrada | Saída | Cache lido | Cache gravado | Custo (US$) | Custo (R$) | Origem | Assinatura |',
+        '|---|---|---|---|---|---|---|---|---|---|');
+      for (const m of dadosUso.modelos) {
+        const u = m.usd !== null ? m.usd.toFixed(4) : '-';
+        const b = m.brl !== null ? m.brl.toFixed(2) : '-';
+        L.push(`| ${esc(m.modelo)} | ${esc(m.provedor)} | ${m.entrada} | ${m.saida} | ${m.cacheLido} | ${m.cacheGravado} | ${esc(u)} | ${esc(b)} | ${esc(m.origem)} | ${esc(m.assinatura || '-')} |`);
+      }
+      const t = dadosUso.total;
+      const tu = t.usd !== null ? t.usd.toFixed(4) : '-';
+      const tb = t.brl !== null ? t.brl.toFixed(2) : '-';
+      L.push(`| **Total** | - | **${t.entrada}** | **${t.saida}** | **${t.cacheLido}** | **${t.cacheGravado}** | **${esc(tu)}** | **${esc(tb)}** | **${esc(t.origem || '-')}** | - |`, '');
+    }
+    if (dadosUso.tarefas.length) {
+      L.push('### Por tarefa', '',
+        '| Tarefa | Entrada | Saída | Cache lido | Cache gravado | Custo (US$) | Custo (R$) | Origem |',
+        '|---|---|---|---|---|---|---|---|');
+      for (const tf of dadosUso.tarefas) {
+        const u = tf.total.usd !== null ? tf.total.usd.toFixed(4) : '-';
+        const b = tf.total.brl !== null ? tf.total.brl.toFixed(2) : '-';
+        const tit = tf.titulo ? `: ${esc(tf.titulo)}` : '';
+        L.push(`| ${esc(tf.id)}${tit} | ${tf.total.entrada} | ${tf.total.saida} | ${tf.total.cacheLido} | ${tf.total.cacheGravado} | ${esc(u)} | ${esc(b)} | ${esc(tf.total.origem)} |`);
+      }
+      L.push('', '*Claude Code e Antigravity são assinaturas: o custo é o equivalente em API.*', '');
+    }
+
     if (p.resumoFinal) L.push('## Resumo', '', '```', p.resumoFinal, '```', '');
     L.push(`Logs: \`${path.join(pdir(p.id), 'logs')}\``, '', 'Ver também [[guias_e_comandos/skill_delegar_orquestracao]].', '');
     fs.writeFileSync(path.join(dir, `${p.id}.md`), L.join('\n'), 'utf8');
@@ -949,6 +1569,42 @@ async function api(req, res, url) {
   }
   if (parts[1] === 'perfis') return await rotaPerfis(req, res, parts);
   if (parts[1] === 'cotas') return await rotaCotas(req, res, parts);
+  if (parts[1] === 'uso') {
+    if (parts.length > 2) return send(res, 404, { erro: 'não encontrado' });
+    if (req.method !== 'GET') return send(res, 405, { erro: 'método não permitido' });
+    const periodo = url.searchParams.has('periodo') ? url.searchParams.get('periodo') : '30d';
+    if (!['hoje', '7d', '30d', 'tudo'].includes(periodo)) return send(res, 400, { erro: 'período inválido' });
+    const tabela = carregarPrecos({ dataDir: DATA });
+    return send(res, 200, respostaUsoGeral(periodo, tabela));
+  }
+  if (parts[1] === 'precos') {
+    const sub = parts[2];
+    if (parts.length > 3 || (sub && sub !== 'atualizar')) return send(res, 404, { erro: 'não encontrado' });
+    if (sub === 'atualizar') {
+      if (req.method !== 'POST') return send(res, 405, { erro: 'método não permitido' });
+      const r = await atualizarPrecos({ dataDir: DATA });
+      const tabela = r.tabela || carregarPrecos({ dataDir: DATA });
+      return send(res, 200, {
+        ok: r.ok,
+        atualizados: r.atualizados,
+        aviso: r.aviso,
+        atualizado: tabela.atualizado || null,
+        idadeDias: idadeDias(tabela),
+        fonte: tabela.fonte || null,
+        usdBrl: tabela.usdBrl ?? null,
+        modelos: tabela.modelos || {}
+      });
+    }
+    if (req.method !== 'GET') return send(res, 405, { erro: 'método não permitido' });
+    const tabela = carregarPrecos({ dataDir: DATA });
+    return send(res, 200, {
+      atualizado: tabela.atualizado || null,
+      idadeDias: idadeDias(tabela),
+      fonte: tabela.fonte || null,
+      usdBrl: tabela.usdBrl ?? null,
+      modelos: tabela.modelos || {}
+    });
+  }
   if (parts[1] === 'modelos' && parts[2] === 'atualizar') {
     if (parts.length > 3) return send(res, 404, { erro: 'não encontrado' });
     if (req.method !== 'POST') return send(res, 405, { erro: 'método não permitido' });
@@ -972,7 +1628,7 @@ async function api(req, res, url) {
     const stamp = `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}${z(d.getHours())}${z(d.getMinutes())}`;
     const p = { id: `${stamp}-${slug(titulo)}-${crypto.randomBytes(2).toString('hex')}`, titulo, tituloFixo: !!b.titulo, pedido, repo, modo: 'padrao', auto: !!b.auto,
       supervisao: temSup(b.supervisao) ? b.supervisao : 'automatico',
-      criado: now(), estado: 'planejando', mensagens: [{ papel: 'usuario', texto: pedido, quando: now() }], sessao: null, plano: null };
+      criado: now(), estado: 'planejando', mensagens: [{ papel: 'usuario', texto: pedido, quando: now() }], sessao: null, plano: null, uso: { chamadas: [] } };
     const erro = aplicarModo(p, { modo: b.modo || 'padrao', custom: b.custom, perfil: b.perfil });
     if (erro) return send(res, 400, { erro });
     if (!adaptar(cfgDe(p).planner).length) return send(res, 400, { erro: 'nenhuma CLI de IA (claude, agy ou opencode) encontrada neste PC' });
@@ -988,6 +1644,12 @@ async function api(req, res, url) {
     if (parts.length > 4) return send(res, 404, { erro: 'não encontrado' });
     if (req.method !== 'GET') return send(res, 405, { erro: 'método não permitido' });
     return send(res, 200, cotasDoProjetoView(p));
+  }
+  if (parts[3] === 'uso') {
+    if (parts.length > 4) return send(res, 404, { erro: 'não encontrado' });
+    if (req.method !== 'GET') return send(res, 405, { erro: 'método não permitido' });
+    const tabela = carregarPrecos({ dataDir: DATA });
+    return send(res, 200, dadosUsoPublico(p, tabela));
   }
   if (req.method !== 'POST') return send(res, 405, { erro: 'método não permitido' });
   const b = await readBody(req);
@@ -1103,4 +1765,10 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`Delegar em http://127.0.0.1:${PORT} (pid ${process.pid}) · provedores: ${Object.entries(detectar()).filter(([, v]) => v).map(([k]) => k).join(', ') || 'nenhum'}`);
   // Descoberta de modelos em segundo plano: o painel já responde enquanto ela roda.
   iniciarDescoberta({ dataDir: DATA }).then((r) => console.log(`descoberta de modelos: ${r.novos.length} novos; erros: ${Object.keys(r.erros).length ? Object.entries(r.erros).map(([k, v]) => k + ': ' + v).join('; ') : 'nenhum'}`)).catch((e) => console.error('descoberta de modelos falhou:', e));
+  // Atualização de preços se vencidos (> 30 dias) em segundo plano
+  atualizarSeVencido({ dataDir: DATA }).then((r) => {
+    if (r.pulou) console.log(`preços: tabela em dia (${idadeDias(r.tabela)} dias).`);
+    else if (r.ok) console.log(`preços atualizados: ${r.atualizados} modelos${r.aviso ? ' (' + r.aviso + ')' : ''}.`);
+    else console.error(`atualização de preços: ${r.aviso || 'falha'}`);
+  }).catch((e) => console.error('atualização de preços falhou:', e));
 });

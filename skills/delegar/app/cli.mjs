@@ -18,6 +18,8 @@
 //   node cli.mjs modelos [--atualizar]           provedores instalados, modelos (novos marcados com [novo]) e a ordem do modo desespero;
 //                                                --atualizar lê de novo as listas do agy e do opencode agora
 //   node cli.mjs cotas [--atualizar]             restante de cada cota (5 h e semanal) e quando renova; --atualizar lê de novo agora (20 a 40 s)
+//   node cli.mjs uso [id] [--periodo hoje|7d|30d|tudo]   tokens e custos por modelo e tarefa (ou geral se sem id)
+//   node cli.mjs precos [--atualizar]            tabela de preços por milhão de tokens; --atualizar baixa da fonte agora
 //   node cli.mjs arquivar <id> | desarquivar <id>   tira o projeto da lista (ou devolve)
 //   node cli.mjs excluir <id>                    move a pasta do projeto para a lixeira (DATA/lixeira); não toca no repositório
 //   node cli.mjs status [--todos]                lista os projetos; --todos inclui os arquivados
@@ -140,6 +142,162 @@ export function formatarCotas(dados) {
   return out.join('\n');
 }
 
+const fmtTokens = (n) => (n == null || !Number.isFinite(n) ? '-' : (n).toLocaleString('pt-BR'));
+const fmtUsd = (v) => (v == null || !Number.isFinite(v) ? '-' : (v > 0 && v < 0.01 ? v.toLocaleString('pt-BR', { minimumFractionDigits: 4, maximumFractionDigits: 4 }) : v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })));
+const fmtBrl = (v) => (v == null || !Number.isFinite(v) ? '-' : (v > 0 && v < 0.01 ? v.toLocaleString('pt-BR', { minimumFractionDigits: 4, maximumFractionDigits: 4 }) : v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })));
+const formatarData = (iso) => {
+  if (!iso) return '-';
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? String(iso) : d.toLocaleDateString('pt-BR');
+};
+const alinharTabela = (matriz) => {
+  if (!matriz.length) return [];
+  const larg = matriz[0].map((_, i) => Math.max(...matriz.map((r) => (r[i] != null ? String(r[i]) : '').length)));
+  return matriz.map((r) => r.map((c, i) => (c != null ? String(c) : '').padEnd(larg[i])).join('  ').trimEnd());
+};
+const NOTA_ASSINATURA = 'Claude Code e Antigravity sao assinaturas: valores sao o equivalente em API.';
+const TAREFA_NOMES = { pending: 'na fila', waiting: 'aguardando confirmação', running: 'rodando', done: 'concluída', failed: 'falhou', skipped: 'pulada' };
+
+export function formatarPrecos(dados) {
+  const d = dados || {};
+  const out = [];
+  const atualizado = formatarData(d.atualizado);
+  const idade = d.idadeDias != null ? ` (há ${d.idadeDias} dias)` : '';
+  const fonte = d.fonte ? ` · fonte: ${d.fonte}` : '';
+  const usdBrl = d.usdBrl != null ? ` · US$ 1 = R$ ${fmtBrl(d.usdBrl)}` : '';
+  out.push(`Tabela de preços: ${atualizado}${idade}${fonte}${usdBrl}`);
+
+  const modelos = Object.entries(d.modelos || {});
+  if (!modelos.length) {
+    out.push('Nenhum preço para mostrar.');
+  } else {
+    const cabecalho = ['Modelo', 'US$/M entrada', 'Saída', 'Cache lido', 'Cache gravado', 'Aprox.'];
+    const linhas = [cabecalho];
+    for (const [chave, m] of modelos) {
+      linhas.push([
+        chave,
+        fmtUsd(m.entrada),
+        fmtUsd(m.saida),
+        fmtUsd(m.cacheLido),
+        fmtUsd(m.cacheGravado),
+        m.aproximado ? 'sim' : '-'
+      ]);
+    }
+    out.push(...alinharTabela(linhas));
+  }
+  if (d.aviso) out.push(`Aviso: ${d.aviso}`);
+  return out.join('\n');
+}
+
+export function formatarUso(dados, { projeto = false } = {}) {
+  const d = dados || {};
+  const out = [];
+
+  const temBrl = (d.usdBrl != null && Number.isFinite(d.usdBrl)) ||
+    (d.total && d.total.brl != null && Number.isFinite(d.total.brl)) ||
+    (Array.isArray(d.modelos) && d.modelos.some((m) => m.brl != null && Number.isFinite(m.brl))) ||
+    (Array.isArray(d.tarefas) && d.tarefas.some((t) => t.total && t.total.brl != null && Number.isFinite(t.total.brl)));
+
+  if (projeto) {
+    if (d.emAndamento) out.push('Execução em andamento.');
+    const t = d.total || {};
+    let totStr = `Total do projeto: ${fmtTokens(t.entrada)} entrada · ${fmtTokens(t.saida)} saída · ${fmtTokens(t.cacheLido)} cache lido · ${fmtTokens(t.cacheGravado)} cache gravado · US$ ${fmtUsd(t.usd)}`;
+    if (temBrl) totStr += ` · R$ ${fmtBrl(t.brl)}`;
+    if (t.origem && t.origem !== 'cli' && t.origem !== 'tabela') totStr += ` (${t.origem})`;
+    out.push(totStr);
+    out.push('');
+
+    out.push('Modelos:');
+    const cabMod = ['Modelo', 'Entrada', 'Saída', 'Cache lido', 'Cache gravado', 'US$'];
+    if (temBrl) cabMod.push('R$');
+    cabMod.push('Origem');
+    const linMod = [cabMod];
+    for (const m of (d.modelos || [])) {
+      const row = [
+        (m.provedor ? m.provedor + ':' : '') + (m.modelo || '-'),
+        fmtTokens(m.entrada),
+        fmtTokens(m.saida),
+        fmtTokens(m.cacheLido),
+        fmtTokens(m.cacheGravado),
+        fmtUsd(m.usd),
+      ];
+      if (temBrl) row.push(fmtBrl(m.brl));
+      row.push(m.origem && m.origem !== 'cli' && m.origem !== 'tabela' ? `(${m.origem})` : (m.origem || '-'));
+      linMod.push(row);
+    }
+    out.push(...alinharTabela(linMod));
+    out.push('');
+
+    out.push('Tarefas:');
+    const cabTar = ['Tarefa', 'Estado', 'Entrada', 'Saída', 'Cache lido', 'Cache gravado', 'US$'];
+    if (temBrl) cabTar.push('R$');
+    cabTar.push('Origem');
+    const linTar = [cabTar];
+
+    const tarefas = [...(d.tarefas || [])].sort((a, b) => {
+      if (a.id === 'planejador') return -1;
+      if (b.id === 'planejador') return 1;
+      return 0;
+    });
+
+    for (const tf of tarefas) {
+      const u = tf.total || {};
+      const nome = tf.titulo ? `${tf.id} (${tf.titulo})` : tf.id;
+      const estadoFormatado = TAREFA_NOMES[tf.estado] || tf.estado || '-';
+      const row = [
+        nome,
+        estadoFormatado,
+        fmtTokens(u.entrada),
+        fmtTokens(u.saida),
+        fmtTokens(u.cacheLido),
+        fmtTokens(u.cacheGravado),
+        fmtUsd(u.usd),
+      ];
+      if (temBrl) row.push(fmtBrl(u.brl));
+      row.push(u.origem && u.origem !== 'cli' && u.origem !== 'tabela' ? `(${u.origem})` : (u.origem || '-'));
+      linTar.push(row);
+    }
+    out.push(...alinharTabela(linTar));
+  } else {
+    const periodo = d.periodo ? `Período: ${d.periodo}` : 'Uso geral:';
+    const projetos = d.projetos != null ? ` (${d.projetos} projeto${d.projetos !== 1 ? 's' : ''})` : '';
+    out.push(periodo + projetos);
+
+    const t = d.total || {};
+    let totStr = `Total: ${fmtTokens(t.entrada)} entrada · ${fmtTokens(t.saida)} saída · ${fmtTokens(t.cacheLido)} cache lido · ${fmtTokens(t.cacheGravado)} cache gravado · US$ ${fmtUsd(t.usd)}`;
+    if (temBrl) totStr += ` · R$ ${fmtBrl(t.brl)}`;
+    if (t.origem && t.origem !== 'cli' && t.origem !== 'tabela') totStr += ` (${t.origem})`;
+    out.push(totStr);
+    out.push('');
+
+    const cabMod = ['Modelo', 'Entrada', 'Saída', 'Cache lido', 'Cache gravado', 'US$'];
+    if (temBrl) cabMod.push('R$');
+    cabMod.push('Origem');
+    const linMod = [cabMod];
+    for (const m of (d.modelos || [])) {
+      const row = [
+        (m.provedor ? m.provedor + ':' : '') + (m.modelo || '-'),
+        fmtTokens(m.entrada),
+        fmtTokens(m.saida),
+        fmtTokens(m.cacheLido),
+        fmtTokens(m.cacheGravado),
+        fmtUsd(m.usd),
+      ];
+      if (temBrl) row.push(fmtBrl(m.brl));
+      row.push(m.origem && m.origem !== 'cli' && m.origem !== 'tabela' ? `(${m.origem})` : (m.origem || '-'));
+      linMod.push(row);
+    }
+    out.push(...alinharTabela(linMod));
+  }
+
+  out.push('');
+  out.push(NOTA_ASSINATURA);
+  if (d.aviso && d.aviso !== NOTA_ASSINATURA) out.push(`Aviso: ${d.aviso}`);
+  return out.join('\n');
+}
+
 const [cmd, ...rest] = process.argv.slice(2);
 const o = opts(rest);
 try {
@@ -195,6 +353,32 @@ try {
       if (o.atualizar) console.log('lendo as cotas (20 a 40 s)...');
       const d = o.atualizar ? await call('POST', '/api/cotas/atualizar') : await call('GET', '/api/cotas');
       console.log(formatarCotas(d)); break;
+    }
+    case 'uso': {
+      const id = o._[0];
+      const periodo = o.periodo || '30d';
+      if (!['hoje', '7d', '30d', 'tudo'].includes(periodo)) {
+        throw new Error('período inválido: use hoje, 7d, 30d ou tudo');
+      }
+      if (id) {
+        const d = await call('GET', `/api/projetos/${encodeURIComponent(id)}/uso`);
+        console.log(formatarUso(d, { projeto: true }));
+      } else {
+        const d = await call('GET', `/api/uso?periodo=${encodeURIComponent(periodo)}`);
+        console.log(formatarUso(d, { projeto: false }));
+      }
+      break;
+    }
+    case 'precos': {
+      if (o.atualizar) {
+        const r = await call('POST', '/api/precos/atualizar');
+        if (r.aviso) console.log('Aviso: ' + r.aviso);
+        else console.log(`Preços atualizados (${r.atualizados ?? 0} modelos).`);
+      } else {
+        const d = await call('GET', '/api/precos');
+        console.log(formatarPrecos(d));
+      }
+      break;
     }
     case 'modelos': {
       const c = o.atualizar ? await call('POST', '/api/modelos/atualizar') : await call('GET', '/api/modelos');

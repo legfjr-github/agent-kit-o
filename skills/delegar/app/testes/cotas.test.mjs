@@ -47,7 +47,7 @@ test('formato TAB: Gemini, Argon e Claude/GPT', () => {
   assert.equal(r.gemini.fiveHour, 0.1);
   assert.equal(r.gemini.sevenDay, 0.45);
   assert.equal(r.gemini.exhausted, false);
-  assert.equal(r.gemini.maxParallel, 2);
+  assert.equal(r.gemini.maxParallel, 5); // menos de 50% usado: até 5 agentes ao mesmo tempo
   assert.equal(r.gemini.fiveHourResets, local('2026-11-13T17:07:41Z'));
   assert.equal(r.gemini.sevenDayResets, local('2026-11-17T14:04:15Z'));
   assert.equal(r.argon.read, true);
@@ -69,7 +69,7 @@ test('formato de terminal com Quota: e hora -03', () => {
   assert.equal(r.gemini.sevenDay, 0.45);
   assert.equal(r.argon.sevenDayRemaining, 0.84);
   assert.equal(r.agyClaudeGpt.read, true);
-  assert.equal(r.gemini.maxParallel, 2);
+  assert.equal(r.gemini.maxParallel, 5); // menos de 50% usado: até 5 agentes ao mesmo tempo
   assert.equal(r.gemini.sevenDayResets, local('2026-11-17T14:04:00Z'));
   assert.equal(r.gemini.fiveHourResets, local('2026-11-13T17:07:00Z'));
   assert.equal(r.argon.sevenDayResets, local('2026-11-17T16:25:00Z'));

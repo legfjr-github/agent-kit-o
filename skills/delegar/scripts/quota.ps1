@@ -303,13 +303,15 @@ if ($gemini.read) {
   $usedAll = @($parsed | Where-Object { $_.group -eq 'gemini' } | ForEach-Object { 1 - $_.remaining })
   $maxUsed = ($usedAll | Measure-Object -Maximum).Maximum
   $hrs5 = if ($gemini.fiveHourResets) { ([datetime]$gemini.fiveHourResets - $now).TotalHours } else { 999 }
+  # Plenty of quota left allows several agents at once (independent batches finish sooner).
   if ($gemini.exhausted) { $gemini.maxParallel = 0 }
-  elseif ($maxUsed -lt 0.5 -or ($hrs5 -lt 3 -and $maxUsed -lt 0.8)) { $gemini.maxParallel = 2 }
+  elseif ($maxUsed -lt 0.5 -or ($hrs5 -lt 1 -and $maxUsed -lt 0.8)) { $gemini.maxParallel = 5 }
+  elseif ($maxUsed -lt 0.75 -or ($hrs5 -lt 2 -and $maxUsed -lt 0.9)) { $gemini.maxParallel = 3 }
   else { $gemini.maxParallel = 1 }
 }
 if (-not $hasAgy) { $gemini.source = 'not installed'; $gemini.maxParallel = 0 }
 
-$total = [Math]::Min(3, $gemini.maxParallel + $claude.maxParallel)
+$total = [Math]::Min(6, $gemini.maxParallel + $claude.maxParallel)
 # PC with only the free models (opencode): they are the normal chain there, not a "desperate" fallback.
 if (-not $hasClaude -and -not $hasAgy -and $hasOpencode) { $total = 2 }
 $leitura = [pscustomobject]@{

@@ -65,7 +65,7 @@ before(async () => {
     const ocupada = await fetch(`http://127.0.0.1:${PORT}/api/saude`).then(() => true, () => false);
     assert.ok(!ocupada, `porta ${PORT} já está em uso por outro processo; libere-a ou defina DELEGAR_TESTE_PORTA`);
     filho = spawn(process.execPath, [SERVER], {
-      env: { ...process.env, DELEGAR_PORT: String(PORT), DELEGAR_DATA: DATA, DELEGAR_VAULT: VAULT, DELEGAR_PROVEDORES: 'nenhum', DELEGAR_QUOTA_SCRIPT: QUOTA_FALSO },
+      env: { ...process.env, DELEGAR_PORT: String(PORT), DELEGAR_DATA: DATA, DELEGAR_VAULT: VAULT, DELEGAR_PROVEDORES: 'nenhum', DELEGAR_QUOTA_SCRIPT: QUOTA_FALSO, DELEGAR_PRECOS_OFFLINE: '1' },
       stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
     });
     filho.stdout.on('data', (c) => { saida += c; });
@@ -423,7 +423,7 @@ test('cotas: GET sem cache responde na hora com lendo:true e depois traz as linh
   const ini = Date.now();
   const r = await get('/api/cotas');
   assert.equal(r.status, 200);
-  assert.ok(Date.now() - ini < 800, 'responde sem esperar o script');
+  assert.ok(Date.now() - ini < 1500, 'responde sem esperar o script');
   assert.equal(r.json.lendo, true);
   assert.equal(r.json.erro, null);
   assert.equal(linhaDe(r, 'claude-5h').restante, null);

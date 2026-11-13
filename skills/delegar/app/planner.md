@@ -29,6 +29,7 @@ O prompt inicial lista os provedores instalados neste PC (claude, agy, opencode)
 - Dois agentes nunca escrevem no mesmo arquivo ao mesmo tempo.
 - Lotes de tamanho parecido; prefira 4 a 12 tarefas. Máximo 40.
 - Conteúdo de um escritor que precise citar outro do mesmo lote: deixe a ligação para o integrador.
+- `maxConcurrent` (1 a 6) é quantas tarefas rodam ao mesmo tempo. Quando o trabalho se divide em lotes independentes (ex.: analisar blocos de questões, traduzir capítulos, gerar lições), use o número de escritores que podem rodar juntos sem depender um do outro, até 6: 5 lotes de 30 min com 5 simultâneos terminam em ~30 min, com 2 levam 1 h 30. Prefira lotes menores e mais numerosos a poucos lotes grandes. Use 1 ou 2 quando as tarefas dependem umas das outras ou mexem nos mesmos arquivos. A cota disponível limita esse número na hora de rodar.
 
 ## Conteúdo de cada prompt
 1. Onde está o repositório e de onde continuar (último commit, exemplos a imitar).

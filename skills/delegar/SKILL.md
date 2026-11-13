@@ -25,6 +25,8 @@ node SKILL\app\cli.mjs aprovar <id>         # inicia a execução
 node SKILL\app\cli.mjs confirmar <id> <confirmação> sim|nao   # responde a uma parada do modo acompanhado
 node SKILL\app\cli.mjs atividade [id]       # quem está fazendo o quê agora, últimas atualizações e commits
 node SKILL\app\cli.mjs cotas [--atualizar]  # cota restante de cada grupo, renovação e hora da leitura; --atualizar lê de novo (20 a 40 s)
+node SKILL\app\cli.mjs uso [id] [--periodo 7d] # tokens e custo estimado do projeto ou geral (hoje, 7d, 30d, tudo)
+node SKILL\app\cli.mjs precos [--atualizar]    # tabela de preços por modelo; --atualizar força consulta ao LiteLLM
 node SKILL\app\cli.mjs modelos              # CLIs instaladas, catálogo (novos marcados com [novo]) e ordem do modo desespero
 node SKILL\app\cli.mjs modelos --atualizar  # lê de novo as listas do agy e do opencode agora
 node SKILL\app\cli.mjs perfis               # lista os perfis salvos (nome, primeiro modelo do planejador, data)
@@ -205,6 +207,33 @@ Antes de cada rodada, leia `scripts/quota.ps1` (leva cerca de 30 s: o agy respon
 - `recommendedConcurrent` soma as duas recomendações (máximo 3). O segundo trabalhador é seguro mesmo com a cota do Gemini incerta quando o Claude tem folga, porque a cadeia de reserva cai no Sonnet.
 
 Acelere (2 simultâneos, raramente 3) quando a cota estiver quase cheia ou quando sobrar bastante e a janela estiver perto de renovar (cota que seria perdida). Reduza para 1 quando qualquer provedor passar de ~80% usado. Se todos estiverem acima de 90% usado, pare e avise o usuário com os horários de renovação.
+
+## Tokens e custo
+
+O Delegar registra o consumo de tokens e calcula o custo financeiro aproximado de cada execução.
+
+- **Contagem por CLI:**
+  - Claude: extraído do evento final `result` do stream-json (`usage`, `modelUsage` e `total_cost_usd`).
+  - Opencode: soma dos eventos de cada passo (`step_finish` com `tokens` e `cost`).
+  - Antigravity (agy): lido do evento `result` quando traz contagem. Em texto puro (saída `--print` do worker), estima por caracteres divididos por 4, o que subestima o uso real por não registrar leitura de arquivos.
+  - Fontes registradas: `cli` (contagem completa), `cli-parcial` (execução interrompida) ou `estimado` (caracteres / 4).
+  - Onde fica: em cada tentativa em `attempts[].uso` dentro de `logs/<tarefa>/result.json` e em `p.uso` em `project.json` (planejador e corretor de JSON).
+- **Tabela de preços:**
+  - Base versionada em `skills/delegar/app/precos.json` (US$ por milhão de tokens).
+  - Cópia de trabalho em `%USERPROFILE%\.delegar\precos.json` sobrepõe a versionada e guarda alterações locais.
+  - Campos principais: `atualizado` (data da tabela), `fonte`, `usdBrl` (taxa de conversão editável, ex.: 5.61) e tabela `modelos`.
+  - Modelos sem preço direto usam modelo parente aproximado (`aproximado: true`); gratuitos são fixados em zero (`gratuito: true`).
+  - Quando a CLI do Claude informa `total_cost_usd`, o valor da própria CLI é aproveitado diretamente.
+- **Atualização mensal:**
+  - Ao iniciar o painel, se a tabela tiver mais de 30 dias, o servidor baixa o JSON público do LiteLLM via GET (sem enviar dados do usuário, com timeout de 20 s e limite de 20 MB).
+  - Atualiza apenas os modelos mapeados e mantém os cadastrados manualmente.
+  - Sem internet ou em caso de erro, a tabela anterior é preservada integralmente.
+  - Variáveis de ambiente: `DELEGAR_PRECOS_OFFLINE=1` desativa a atualização automática; `DELEGAR_PRECOS_URL` permite apontar URL alternativa.
+- **Onde consultar:**
+  - Painel: aba Cotas > seção **Uso e custo** (filtros: hoje, 7 dias, 30 dias, tudo; botão **Atualizar preços**); tela do projeto > bloco **Tokens e custo do projeto** (atualizado ao vivo); resumo final e relatório no cofre.
+  - CLI: `node cli.mjs uso [id] [--periodo 7d]` e `node cli.mjs precos [--atualizar]`.
+  - APIs HTTP: `GET /api/uso`, `GET /api/projetos/:id/uso`, `GET /api/precos` e `POST /api/precos/atualizar`.
+- **Aviso sobre assinaturas:** Claude Code e Antigravity operam sob plano de assinatura. Os valores exibidos em US$ e R$ representam o equivalente teórico em consumo de API comercial, não uma cobrança financeira adicional na fatura.
 
 ## Paralelismo
 

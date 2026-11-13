@@ -1,0 +1,33 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "num_turns": 12,
+  "result": "Resposta final neutra.",
+  "stop_reason": "end_turn",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "total_cost_usd": 0.01925682,
+  "usage": {
+    "input_tokens": 20,
+    "cache_creation_input_tokens": 38883,
+    "cache_read_input_tokens": 583472,
+    "output_tokens": 11287,
+    "output_tokens_details": {
+      "thinking_tokens": 4508
+    },
+    "service_tier": "standard"
+  },
+  "modelUsage": {
+    "claude-haiku-5-5": {
+      "inputTokens": 20,
+      "outputTokens": 11287,
+      "cacheReadInputTokens": 583472,
+      "cacheCreationInputTokens": 38883,
+      "webSearchRequests": 0,
+      "costUSD": 0.01925682,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000
+    }
+  },
+  "uuid": "00000000-0000-4000-8000-000000000099"
+}

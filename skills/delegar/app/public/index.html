@@ -55,6 +55,22 @@
     <section id="cotas" class="hidden">
       <div class="card"><h2>Cotas</h2><p class="hint">Quanto resta em cada provedor. A leitura do Antigravity e do Claude leva de 20 a 40 s.</p><p id="cotasMsg" class="hint"></p></div>
       <div id="cotasLista" class="cotas-lista"></div>
+      <section class="card uso-secao">
+        <h3>Uso e custo</h3>
+        <div class="uso-filtro">
+          <label>Período
+            <select id="usoPeriodo">
+              <option value="hoje">Hoje</option>
+              <option value="7d">7 dias</option>
+              <option value="30d" selected>30 dias</option>
+              <option value="tudo">Tudo</option>
+            </select>
+          </label>
+        </div>
+        <div class="uso-rolagem" id="usoTabela"></div>
+        <p class="uso-nota" id="usoNota"></p>
+        <div class="uso-precos" id="usoPrecos"></div>
+      </section>
     </section>
 
     <section id="proj" class="hidden">
@@ -79,6 +95,13 @@
       <div id="pBarra" class="card"></div>
 
       <div id="pCotasBox" class="card cotas-mini hidden"><h3>Cotas dos modelos deste projeto</h3><div id="pCotas"></div></div>
+
+      <section id="pUsoBox" class="card uso-secao hidden">
+        <h3>Tokens e custo do projeto</h3>
+        <div id="pUsoTotal"></div>
+        <div id="pUsoModelos"></div>
+        <div id="pUsoTarefas"></div>
+      </section>
 
       <div id="pGates" class="hidden"></div>
 

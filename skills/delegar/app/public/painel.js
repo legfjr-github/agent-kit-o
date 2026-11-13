@@ -347,12 +347,17 @@ function render(p) {
 
 async function refresh() {
   if (vista === 'atividade') return refreshAtividade();
-  if (vista === 'cotas') return refreshCotas();
+  if (vista === 'cotas') {
+    refreshCotas();
+    refreshUso();
+    return;
+  }
   if (!atual) return;
   try {
     const p = await call('GET', `/api/projetos/${atual}`);
     render(p);
     refreshCotasProjeto(p.id);
+    refreshUsoProjeto(p.id);
     const ativo = p.estado === 'executando' || p.ocupado || Object.keys(p.run?.status || {}).length > 0;
     $('pAtivBox').classList.toggle('hidden', !ativo);
     if (ativo) $('pAtiv').replaceChildren(blocoAtividade(await call('GET', `/api/projetos/${atual}/atividade`)));
@@ -440,6 +445,7 @@ async function atualizarCotas(aoAtualizar) {
   cotasUltima = Date.now();
   if (msg && vista === 'cotas') cotasMsg(msg, true);
   pCotasUltima = 0;
+  if (vista === 'cotas') refreshUso(true);
   if (aoAtualizar) aoAtualizar();
   else if (vista === 'proj') refresh();
 }
@@ -454,6 +460,362 @@ async function refreshCotasProjeto(id) {
     box.classList.toggle('hidden', !ls.length);
     $('pCotas').replaceChildren(...ls.map((l) => linhaCota(l, { compacta: true })));
   } catch { if (id === atual) box.classList.add('hidden'); }
+}
+
+// ---------- uso e custos ----------
+let usoBusy = false, usoUltima = 0, precosAtualizando = false, avisoPrecos = null;
+let pUsoBusy = false, pUsoUltima = 0, pUsoId = null, pUsoEmAndamento = false;
+
+function getUsoPeriodo() {
+  try {
+    const s = localStorage.getItem('delegar.uso.periodo');
+    if (['hoje', '7d', '30d', 'tudo'].includes(s)) return s;
+  } catch {}
+  return '30d';
+}
+function setUsoPeriodo(v) {
+  try { localStorage.setItem('delegar.uso.periodo', v); } catch {}
+}
+
+function fmtTokens(n) {
+  if (n == null || !Number.isFinite(n)) return '-';
+  if (n === 0) return '0';
+  if (n >= 1e6) {
+    const v = (n / 1e6).toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 1 });
+    return `${v} mi`;
+  }
+  if (n >= 1000) {
+    if (n >= 100000) return `${Math.round(n / 1000).toLocaleString('pt-BR')} mil`;
+    const v = (n / 1000).toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 1 });
+    return `${v} mil`;
+  }
+  return n.toLocaleString('pt-BR');
+}
+
+function fmtExato(n) {
+  if (n == null || !Number.isFinite(n)) return '';
+  return n.toLocaleString('pt-BR');
+}
+
+function fmtUsd(v) {
+  if (v == null || !Number.isFinite(v)) return '-';
+  if (v === 0) return '0,00';
+  if (v > 0 && v < 0.01) {
+    return v.toLocaleString('pt-BR', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+  }
+  return v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function fmtUsdExato(v) {
+  if (v == null || !Number.isFinite(v)) return '';
+  return 'US$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+}
+
+function fmtBrl(v) {
+  if (v == null || !Number.isFinite(v)) return '-';
+  if (v === 0) return '0,00';
+  if (v > 0 && v < 0.01) {
+    return v.toLocaleString('pt-BR', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+  }
+  return v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function fmtBrlExato(v) {
+  if (v == null || !Number.isFinite(v)) return '';
+  return 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+}
+
+function formatarDataPrecos(iso) {
+  if (!iso) return '-';
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  return d.toLocaleDateString('pt-BR');
+}
+
+function badgeAssinatura(ass) {
+  if (!ass) return null;
+  const txt = typeof ass === 'string'
+    ? (ass.toLowerCase().startsWith('assinatura') ? ass : `assinatura ${ass}`)
+    : 'assinatura';
+  return el('span', { class: 'uso-origem assinatura', text: txt });
+}
+
+function badgeOrigem(origem) {
+  if (!origem || origem === 'assinatura') return null;
+  const cls = ['cli', 'tabela', 'aproximado', 'estimado', 'gratuito', 'desconhecido'].includes(origem) ? origem : 'desconhecido';
+  return el('span', { class: `uso-origem ${cls}`, text: origem });
+}
+
+function criarTabelaUsoModelos(modelos, total, temBrl) {
+  const thead = el('thead', {},
+    el('tr', {},
+      el('th', { text: 'Modelo' }),
+      el('th', { class: 'num', text: 'Entrada' }),
+      el('th', { class: 'num', text: 'Saída' }),
+      el('th', { class: 'num', text: 'Cache lido' }),
+      el('th', { class: 'num', text: 'Cache gravado' }),
+      el('th', { class: 'num', text: 'US$' }),
+      temBrl ? el('th', { class: 'num', text: 'R$' }) : null
+    )
+  );
+  const tbody = el('tbody', {},
+    ...(modelos || []).map((m) => {
+      const idBase = m.modelo || m.provedor || 'desconhecido';
+      const fullId = m.provedor && !idBase.startsWith(m.provedor + ':') ? `${m.provedor}:${idBase}` : idBase;
+      const modCell = el('td', {},
+        el('span', { text: nomeModelo(fullId) }),
+        badgeAssinatura(m.assinatura),
+        badgeOrigem(m.origem),
+        m.estimado && m.origem !== 'estimado' ? el('span', { class: 'uso-origem estimado', text: 'estimado' }) : null
+      );
+      return el('tr', {},
+        modCell,
+        el('td', { class: 'num', title: fmtExato(m.entrada) ? fmtExato(m.entrada) + ' tokens' : '' }, fmtTokens(m.entrada)),
+        el('td', { class: 'num', title: fmtExato(m.saida) ? fmtExato(m.saida) + ' tokens' : '' }, fmtTokens(m.saida)),
+        el('td', { class: 'num', title: fmtExato(m.cacheLido) ? fmtExato(m.cacheLido) + ' tokens' : '' }, fmtTokens(m.cacheLido)),
+        el('td', { class: 'num', title: fmtExato(m.cacheGravado) ? fmtExato(m.cacheGravado) + ' tokens' : '' }, fmtTokens(m.cacheGravado)),
+        el('td', { class: 'num', title: fmtUsdExato(m.usd) }, fmtUsd(m.usd)),
+        temBrl ? el('td', { class: 'num', title: fmtBrlExato(m.brl) }, fmtBrl(m.brl)) : null
+      );
+    })
+  );
+  if (total) {
+    const totalRow = el('tr', { class: 'uso-total' },
+      el('td', {}, el('strong', { text: 'Total' }), total.aproximado ? el('span', { class: 'uso-origem aproximado', text: 'aproximado' }) : null),
+      el('td', { class: 'num', title: fmtExato(total.entrada) ? fmtExato(total.entrada) + ' tokens' : '' }, fmtTokens(total.entrada)),
+      el('td', { class: 'num', title: fmtExato(total.saida) ? fmtExato(total.saida) + ' tokens' : '' }, fmtTokens(total.saida)),
+      el('td', { class: 'num', title: fmtExato(total.cacheLido) ? fmtExato(total.cacheLido) + ' tokens' : '' }, fmtTokens(total.cacheLido)),
+      el('td', { class: 'num', title: fmtExato(total.cacheGravado) ? fmtExato(total.cacheGravado) + ' tokens' : '' }, fmtTokens(total.cacheGravado)),
+      el('td', { class: 'num', title: fmtUsdExato(total.usd) }, fmtUsd(total.usd)),
+      temBrl ? el('td', { class: 'num', title: fmtBrlExato(total.brl) }, fmtBrl(total.brl)) : null
+    );
+    tbody.append(totalRow);
+  }
+  return el('table', { class: 'uso-tabela' }, thead, tbody);
+}
+
+function criarTabelaUsoTarefas(tarefas, emAndamento) {
+  const thead = el('thead', {},
+    el('tr', {},
+      el('th', { text: 'Tarefa' }),
+      el('th', { text: 'Estado' }),
+      el('th', { text: 'Modelo(s)' }),
+      el('th', { class: 'num', text: 'Tokens' }),
+      el('th', { class: 'num', text: 'US$' })
+    )
+  );
+  let somaTokens = 0, somaUsd = null;
+  const rows = (tarefas || []).map((t) => {
+    const nomeTarefa = t.id === 'planejador'
+      ? 'Planejador' + (t.titulo ? ': ' + t.titulo : '')
+      : `${t.id}${t.titulo ? ': ' + t.titulo : ''}`;
+    const rodando = t.estado === 'running' || (emAndamento && t.estado === 'running');
+    const tdTarefa = el('td', {},
+      el('strong', { text: nomeTarefa }),
+      rodando ? el('span', { class: 'uso-vivo', text: ' (rodando)' }) : null
+    );
+    const tdEstado = el('td', {},
+      el('span', { class: 'badge ' + (t.estado || ''), text: TAREFA[t.estado] || ESTADOS[t.estado] || t.estado || '-' })
+    );
+
+    const ms = [...new Set((t.tentativas || []).map((x) => (x.modelo ? (x.provedor && !x.modelo.startsWith(x.provedor + ':') ? `${x.provedor}:${x.modelo}` : x.modelo) : null)).filter(Boolean))];
+    const textoModelos = ms.length ? ms.map(nomeModelo).join(', ') : (t.modelo ? nomeModelo(t.modelo) : '-');
+    const temEstimado = (t.tentativas || []).some((x) => x.fonte === 'estimado' || x.fonte === 'cli-parcial') || t.fonte === 'estimado' || t.fonte === 'cli-parcial';
+    const tdModelos = el('td', {},
+      el('span', { text: textoModelos }),
+      temEstimado ? el('span', { class: 'uso-origem estimado', text: 'estimado' }) : null
+    );
+
+    let toks = 0;
+    if (t.total && typeof t.total === 'object') {
+      toks = (t.total.entrada || 0) + (t.total.saida || 0) + (t.total.cacheLido || 0) + (t.total.cacheGravado || 0);
+    } else if (typeof t.total === 'number') {
+      toks = t.total;
+    } else if (t.tentativas?.length) {
+      toks = t.tentativas.reduce((acc, x) => acc + (x.entrada || 0) + (x.saida || 0) + (x.cacheLido || 0) + (x.cacheGravado || 0), 0);
+    }
+    somaTokens += toks;
+
+    let usd = null;
+    if (t.total?.usd != null) usd = t.total.usd;
+    else if (t.usd != null) usd = t.usd;
+    else if (t.tentativas?.length) {
+      const tentUsd = t.tentativas.reduce((acc, x) => (x.usd != null ? (acc ?? 0) + x.usd : acc), null);
+      if (tentUsd !== null) usd = tentUsd;
+    }
+    if (usd != null) somaUsd = (somaUsd ?? 0) + usd;
+
+    return el('tr', {},
+      tdTarefa,
+      tdEstado,
+      tdModelos,
+      el('td', { class: 'num', title: fmtExato(toks) ? fmtExato(toks) + ' tokens' : '' }, fmtTokens(toks)),
+      el('td', { class: 'num', title: fmtUsdExato(usd) }, fmtUsd(usd))
+    );
+  });
+
+  const tbody = el('tbody', {}, ...rows);
+  if ((tarefas || []).length > 1) {
+    const totalRow = el('tr', { class: 'uso-total' },
+      el('td', { colSpan: 3 }, el('strong', { text: 'Total das tarefas' })),
+      el('td', { class: 'num', title: fmtExato(somaTokens) ? fmtExato(somaTokens) + ' tokens' : '' }, fmtTokens(somaTokens)),
+      el('td', { class: 'num', title: fmtUsdExato(somaUsd) }, fmtUsd(somaUsd))
+    );
+    tbody.append(totalRow);
+  }
+  return el('table', { class: 'uso-tabela' }, thead, tbody);
+}
+
+function renderUso(d, infoPrecos) {
+  if (!d) return;
+  const temBrl = typeof d.usdBrl === 'number' && Number.isFinite(d.usdBrl) && d.usdBrl > 0;
+  const boxTabela = $('usoTabela');
+  if (!d.modelos?.length && (!d.total || (d.total.entrada === 0 && d.total.saida === 0))) {
+    boxTabela.replaceChildren(el('p', { class: 'hint', text: 'Nenhum uso registrado neste período.' }));
+  } else {
+    boxTabela.replaceChildren(criarTabelaUsoModelos(d.modelos, d.total, temBrl));
+  }
+
+  // Nota fixa
+  const dataPrecos = formatarDataPrecos(infoPrecos?.atualizado || d.precosAtualizados);
+  let textoNota = `Claude Code e Antigravity são assinaturas e não cobram por token. Os valores aqui são o equivalente se o mesmo uso fosse pago pela API, pelos preços de ${dataPrecos}.`;
+  if (temBrl) {
+    textoNota += ' R$ é estimativa pela cotação em precos.json.';
+  }
+  if (d.aviso) {
+    textoNota += ' ' + d.aviso;
+  }
+  $('usoNota').textContent = textoNota;
+
+  // Linha de preços
+  const boxPrecos = $('usoPrecos');
+  const fontePrecos = infoPrecos?.fonte || d.fonte;
+  const rotuloPrecos = `Preços de ${dataPrecos}${fontePrecos ? ` (${fontePrecos})` : ''}`;
+  const infoSpan = el('span', { class: 'precos-info', text: rotuloPrecos });
+  const msgStatus = el('span', { class: 'hint precos-msg', text: avisoPrecos || '' });
+  const btnAtualizar = el('button', { type: 'button', text: precosAtualizando ? 'atualizando...' : 'Atualizar preços', disabled: precosAtualizando });
+  btnAtualizar.onclick = async () => {
+    if (precosAtualizando) return;
+    precosAtualizando = true;
+    btnAtualizar.disabled = true;
+    btnAtualizar.textContent = 'atualizando...';
+    msgStatus.textContent = 'atualizando...';
+    try {
+      const res = await call('POST', '/api/precos/atualizar');
+      if (res.aviso) {
+        avisoPrecos = res.aviso;
+      } else if (typeof res.atualizados === 'number') {
+        avisoPrecos = `${res.atualizados} modelo${res.atualizados !== 1 ? 's' : ''} atualizado${res.atualizados !== 1 ? 's' : ''}`;
+      } else {
+        avisoPrecos = 'Preços atualizados.';
+      }
+      msgStatus.textContent = avisoPrecos;
+      await refreshUso(true);
+    } catch (e) {
+      avisoPrecos = 'Não foi possível atualizar: ' + e.message;
+      msgStatus.textContent = avisoPrecos;
+    } finally {
+      precosAtualizando = false;
+      btnAtualizar.disabled = false;
+      btnAtualizar.textContent = 'Atualizar preços';
+    }
+  };
+  boxPrecos.replaceChildren(infoSpan, el('div', { class: 'row' }, btnAtualizar, msgStatus));
+}
+
+async function refreshUso(forcar) {
+  if (usoBusy) return;
+  if (!forcar && Date.now() - usoUltima < 30000 - 1500) return;
+  usoBusy = true;
+  const per = $('usoPeriodo')?.value || getUsoPeriodo();
+  try {
+    const [d, infoPrecos] = await Promise.all([
+      call('GET', `/api/uso?periodo=${encodeURIComponent(per)}`),
+      call('GET', '/api/precos').catch(() => null),
+    ]);
+    renderUso(d, infoPrecos);
+  } catch (e) {
+    $('usoTabela').replaceChildren(el('p', { class: 'erro', text: 'Não foi possível ler os dados de uso: ' + e.message }));
+  } finally {
+    usoBusy = false;
+    usoUltima = Date.now();
+  }
+}
+
+function renderUsoProjeto(d) {
+  const box = $('pUsoBox');
+  box.classList.remove('hidden');
+
+  const tot = d.total || {};
+  const temBrl = typeof tot.brl === 'number' && Number.isFinite(tot.brl) && tot.brl > 0;
+  const totalTokens = (tot.entrada || 0) + (tot.saida || 0) + (tot.cacheLido || 0) + (tot.cacheGravado || 0);
+
+  // 1. Total
+  const totalKids = [
+    el('strong', { text: 'Total: ' }),
+    el('span', { title: fmtExato(totalTokens) ? fmtExato(totalTokens) + ' tokens' : '' }, `${fmtTokens(totalTokens)} tokens`),
+    el('span', { class: 'hint', text: ` (${fmtTokens(tot.entrada)} entrada · ${fmtTokens(tot.saida)} saída${tot.cacheLido ? ' · ' + fmtTokens(tot.cacheLido) + ' cache lido' : ''}${tot.cacheGravado ? ' · ' + fmtTokens(tot.cacheGravado) + ' cache gravado' : ''})` }),
+    document.createTextNode(' · '),
+    el('strong', { text: `US$ ${fmtUsd(tot.usd)}` }),
+  ];
+  if (temBrl) {
+    totalKids.push(document.createTextNode(' · '), el('strong', { text: `R$ ${fmtBrl(tot.brl)}` }));
+  }
+  if (tot.aproximado) {
+    totalKids.push(' ', el('span', { class: 'uso-origem aproximado', text: 'aproximado' }));
+  }
+  if (d.emAndamento) {
+    totalKids.push(' ', el('span', { class: 'uso-vivo', text: '· em andamento' }));
+  }
+  $('pUsoTotal').replaceChildren(el('p', {}, ...totalKids));
+
+  // 2. Modelos
+  const boxModelos = $('pUsoModelos');
+  if (d.modelos?.length) {
+    boxModelos.replaceChildren(
+      el('h4', { text: 'Por modelo' }),
+      el('div', { class: 'uso-rolagem' }, criarTabelaUsoModelos(d.modelos, d.modelos.length > 1 ? tot : null, temBrl))
+    );
+  } else {
+    boxModelos.replaceChildren();
+  }
+
+  // 3. Tarefas
+  const boxTarefas = $('pUsoTarefas');
+  if (d.tarefas?.length) {
+    boxTarefas.replaceChildren(
+      el('h4', { text: 'Por tarefa' }),
+      el('div', { class: 'uso-rolagem' }, criarTabelaUsoTarefas(d.tarefas, d.emAndamento))
+    );
+  } else {
+    boxTarefas.replaceChildren();
+  }
+}
+
+async function refreshUsoProjeto(id, forcar = false) {
+  if (pUsoBusy) return;
+  const intervalo = pUsoEmAndamento ? 10000 : 60000;
+  if (!forcar && pUsoId === id && Date.now() - pUsoUltima < intervalo - 500) return;
+  pUsoBusy = true;
+  pUsoId = id;
+  try {
+    const d = await call('GET', `/api/projetos/${id}/uso`);
+    if (id !== atual) return;
+    pUsoEmAndamento = !!d.emAndamento;
+    renderUsoProjeto(d);
+  } catch (e) {
+    if (id === atual) {
+      $('pUsoBox').classList.remove('hidden');
+      $('pUsoTotal').replaceChildren(el('p', { class: 'erro', text: 'Não foi possível ler o uso do projeto: ' + e.message }));
+      $('pUsoModelos').replaceChildren();
+      $('pUsoTarefas').replaceChildren();
+    }
+  } finally {
+    pUsoBusy = false;
+    pUsoUltima = Date.now();
+  }
 }
 
 async function refreshAtividade() {
@@ -475,6 +837,7 @@ async function contarAtividade() {
 function iniciarTimer() { clearInterval(timer); timer = setInterval(refresh, 4000); }
 async function abrir(id) {
   atual = id; ultimoMsgs = -1; projCfg = null; $('pEditorBox').classList.add('hidden'); delete $('pFluxo').dataset.assin; show('proj');
+  pUsoId = null; pUsoUltima = 0; pUsoEmAndamento = false;
   history.replaceState(null, '', '#' + id);
   await refresh(); iniciarTimer();
 }
@@ -487,7 +850,7 @@ $('btnNovo').onclick = () => {
   const ps = $('nPerfil'); if (ps) ps.value = '';
   fluxoNovo(true);
 };
-$('btnCotas').onclick = () => { atual = null; show('cotas'); history.replaceState(null, '', '#cotas'); refreshCotas(true); iniciarTimer(); };
+$('btnCotas').onclick = () => { atual = null; show('cotas'); history.replaceState(null, '', '#cotas'); refreshCotas(true); refreshUso(true); iniciarTimer(); };
 $('btnAtividade').onclick = () => { atual = null; show('atividade'); history.replaceState(null, '', '#atividade'); refreshAtividade(); iniciarTimer(); };
 $('nCancelar').onclick = () => show('vazio');
 function descNovo() {
@@ -581,6 +944,14 @@ $('pExcluir').onclick = async () => {
   ligarFluxo($('pFluxoRow'), $('pFluxoBtn'), $('pFluxo'), () => (projAtual ? dadosFluxoProj(projAtual) : null));
   $('nModo').value = 'padrao'; $('nSup').value = 'automatico'; descNovo();
   try { const r = localStorage.getItem('delegar.repo'); if (r) $('nRepo').value = r; } catch {}
+  const selPer = $('usoPeriodo');
+  if (selPer) {
+    selPer.value = getUsoPeriodo();
+    selPer.onchange = () => {
+      setUsoPeriodo(selPer.value);
+      refreshUso(true);
+    };
+  }
   $('modosInfo').replaceChildren(
     ...Object.values(MODES).map((m) => el('div', {}, el('strong', { text: m.nome }), el('p', { class: 'hint', text: m.descricao }), el('p', { class: 'hint mono', text: 'Planejador neste PC: ' + (m.plannerEfetivo[0] || 'nenhum instalado') }))),
     el('div', {}, el('strong', { text: 'Personalizado' }), el('p', { class: 'hint', text: 'Escolha os modelos de cada papel do zero, ou parta de um modo pronto e troque o que quiser.' })),

@@ -198,7 +198,8 @@ export function usoAgyBrain(prompt, inicioMs, fimMs, modelo, pastas) {
     const p = partes(modelo, 'agy');
     const bases = pastas || (process.env.DELEGAR_AGY_BRAIN ? [process.env.DELEGAR_AGY_BRAIN]
       : [path.join(os.homedir(), '.gemini', 'antigravity-cli', 'brain')]);
-    const assinatura = String(prompt || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+    // trecho longo: escritores do mesmo plano costumam ter o mesmo começo de prompt e rodar ao mesmo tempo
+    const assinatura = String(prompt || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
     if (assinatura.length < 20 || !Number.isFinite(inicioMs)) return null;
     const ate = Number.isFinite(fimMs) ? fimMs + 120000 : Date.now();
     const t = { entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0 };

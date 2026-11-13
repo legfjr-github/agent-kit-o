@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { entradaValida, QUOTA_RE, DESESPERO, adaptar, catalogo, detectar, desesperoEfetivo, iniciarDescoberta } from './modelos.mjs';
 import { criarPerfis, validarNome } from './perfis.mjs';
 import { linhasDeCotas, cotasDoProjeto } from './cotas.mjs';
-import { modeloSemEsforco, usoClaudeJson, usoOpencode, usoAgyStream, estimar, usoDaTentativa } from './uso.mjs';
+import { modeloSemEsforco, usoClaudeJson, usoOpencode, usoAgyStream, estimar, usoDaTentativa, usoAgyBrain } from './uso.mjs';
 import { carregarPrecos, custoUsd, assinaturaDe, emBrl, idadeDias, atualizarPrecos, atualizarSeVencido } from './precos.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -714,6 +714,30 @@ function piorOrigem(origens) {
 }
 
 const cacheArquivosUso = new Map();
+// Tokens reais de uma tentativa do agy pelos logs locais (brain), quando a saída da CLI não trouxe contagem
+// (tentativas antigas, ou o prompt da tentativa não foi guardado). O prompt vem do .prompt.txt da tentativa ou,
+// na falta dele, do prompt da tarefa com {WT} trocado pela worktree. Cache de 30 s para tentativa em andamento.
+const cacheBrain = new Map();
+function usoAgyReal(p, taskId, entry, pf, inicioMs, fimMs, rodando) {
+  if (!String(entry || '').startsWith('agy:') || !Number.isFinite(inicioMs)) return null;
+  const chave = `${p.id}/${taskId}/${entry}/${inicioMs}`;
+  const c = cacheBrain.get(chave);
+  if (c && (!rodando || Date.now() - c.t < 30000)) return c.v;
+  let prompt = '';
+  try { prompt = fs.readFileSync(pf, 'utf8'); } catch {
+    try {
+      prompt = fs.readFileSync(path.join(pdir(p.id), 'prompts', `${taskId}.md`), 'utf8');
+      const pl = lerJson(path.join(pdir(p.id), 'plan.json'));
+      const tk = (pl?.tasks || []).find((x) => x.id === taskId);
+      if (tk?.worktree && pl.worktreeRoot) prompt = prompt.split('{WT}').join(path.join(pl.worktreeRoot, tk.worktree));
+    } catch {}
+  }
+  const v = prompt ? usoAgyBrain(prompt, inicioMs, rodando ? Date.now() : fimMs, entry) : null;
+  if (cacheBrain.size > 500) cacheBrain.clear();
+  cacheBrain.set(chave, { t: Date.now(), v });
+  return v;
+}
+
 function comCacheArquivo(caminho, fn) {
   if (!caminho) return null;
   try {
@@ -830,7 +854,7 @@ function dadosUsoDoProjeto(p, tabela) {
       for (let idx = 0; idx < attempts.length; idx++) {
         const a = attempts[idx];
         completedIndices.add(idx + 1);
-        const uso = a.uso || (a.out ? comCacheArquivo(a.out, () => {
+        let uso = a.uso || (a.out ? comCacheArquivo(a.out, () => {
           const pf = a.prompt || a.promptFile || a.out.replace(/\.out\.log$/, '.prompt.txt');
           return usoDaTentativa({
             tipo: a.worker?.split(':')[0],
@@ -840,6 +864,10 @@ function dadosUsoDoProjeto(p, tabela) {
             texto: a.text
           });
         }) : null);
+        if (a.out && uso?.fonte !== 'cli') {
+          const real = usoAgyReal(p, path.basename(dir), a.worker, a.out.replace(/\.out\.log$/, '.prompt.txt'), Date.parse(a.started), Date.parse(a.finished), false);
+          if (real) uso = real;
+        }
 
         const { provedor, modelo } = partesModelo(a.worker || 'desconhecido');
         const linhas = Array.isArray(uso?.porModelo) && uso.porModelo.length ? uso.porModelo : [{
@@ -906,7 +934,9 @@ function dadosUsoDoProjeto(p, tabela) {
         const pfPath = path.join(dir, f.replace(/\.out\.log$/, '.prompt.txt'));
         const txtPath = path.join(dir, f.replace(/\.out\.log$/, '.txt'));
 
-        const uso = comCacheArquivo(outPath, () => {
+        let inicioOut = NaN; try { inicioOut = fs.statSync(outPath).birthtimeMs; } catch {}
+        const realRodando = usoAgyReal(p, path.basename(dir), workerEntry, pfPath, inicioOut, NaN, true);
+        const uso = realRodando || comCacheArquivo(outPath, () => {
           let u = usoDaTentativa({
             tipo: workerEntry.split(':')[0],
             modelo: workerEntry,

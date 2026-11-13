@@ -14,7 +14,7 @@ O sistema fica em `app/` desta skill: `server.mjs` (painel em http://127.0.0.1:8
 Quando o usuário pedir para delegar (inclusive remotamente, por mensagem), encaminhe pela CLI. `SKILL` abaixo é a pasta desta skill (`%USERPROFILE%\.claude\skills\delegar`):
 
 ```powershell
-node SKILL\app\cli.mjs novo --repo <pasta> --modo padrao|equilibrado|agressivo|desespero [--acompanhamento automatico|acompanhado|passo] [--auto] [--titulo "..."] "pedido completo"
+node SKILL\app\cli.mjs novo --repo <pasta> --modo padrao|equilibrado|agressivo|desespero [--velocidade auto|rapido|medio|demorado] [--acompanhamento automatico|acompanhado|passo] [--auto] [--titulo "..."] "pedido completo"
 node SKILL\app\cli.mjs novo --repo <pasta> --personalizado modo.json "pedido"   # modo personalizado
 node SKILL\app\cli.mjs novo --repo <pasta> --perfil "Nome do perfil" "pedido"   # perfil salvo
 node SKILL\app\cli.mjs esperar <id> 30      # espera o planejador, uma confirmação ou o fim (rode em segundo plano)
@@ -33,7 +33,7 @@ node SKILL\app\cli.mjs perfis               # lista os perfis salvos (nome, prim
 node SKILL\app\cli.mjs perfis salvar <nome> --personalizado modo.json [--sobrescrever]
 node SKILL\app\cli.mjs perfis renomear <de> <para> | perfis excluir <nome>
 node SKILL\app\cli.mjs modo <id> --perfil <nome>   # aplica um perfil salvo ao projeto, antes de aprovar
-node SKILL\app\cli.mjs status | retomar <id> | cancelar <id> | modo <id> <modo> | acompanhamento <id> <tipo>
+node SKILL\app\cli.mjs status | retomar <id> | cancelar <id> | modo <id> <modo> | velocidade <id> <valor> | acompanhamento <id> <tipo>
 ```
 
 - Sem `--auto`: o planejador conversa e propõe; mostre ao usuário a divisão (`ver`) e só rode `aprovar` quando ele aprovar, ou quando ele disser para confiar.
@@ -60,6 +60,32 @@ Sem Claude no PC, o planejador cai para Gemini 4 Argon (agy) e depois para o mel
 **Personalizado:** no painel, "Ver e mudar os modelos" mostra as cadeias do modo escolhido; qualquer mudança transforma o modo em Personalizado. "Começar do zero" esvazia tudo. Pela CLI, `--personalizado modo.json` com `{"planner":[...],"tiers":{"pesado":[...],"volume":[...],"leve":[...]},"fix":[...],"coord":[...],"maxConcurrent":2}`; cada item é `claude|agy|opencode:<modelo>[@low|medium|high|xhigh|max]`. O último personalizado fica em `%USERPROFILE%\.delegar\personalizado.json`.
 
 **Desespero automático:** quando `quota.ps1` diz que nenhum provedor pago tem cota (Gemini estourado e Claude acima de 90% na janela de 5 h ou 95% na semanal), o pipeline passa a usar `desperateChain` (os gratuitos, do melhor para o pior) em vez de esperar 15 min, e volta ao normal quando a cota retorna. A ordem vem de um teste de 12/11/2026 (ver a nota do cofre `guias_e_comandos/skill_delegar_orquestracao.md`).
+
+### Velocidade e esforço
+
+A velocidade do projeto define o nível de raciocínio e o tempo de resposta dos modelos:
+
+| Velocidade | Executores (escritores e tarefas) | Integração e verificação |
+|---|---|---|
+| auto | Usa o esforço de cada tarefa (ou o padrão do modo) | Médio (alto no modo agressivo) |
+| rapido | Baixo (`low`) | Médio (`medium`) |
+| medio | Médio (`medium`) | Médio (`medium`) |
+| demorado | Alto (`high`) | Alto (`high`) |
+
+A integração e a verificação (tarefas integradoras, `fixChain` e `coordinatorChain`) nunca usam esforço baixo, mesmo na velocidade `rapido`. Na velocidade `demorado`, usam esforço alto.
+
+O campo opcional `esforco` (`low`, `medium`, `high`) pode ser sugerido pelo planejador para cada tarefa do plano:
+- `medium`: recomendado para a maioria dos casos de desenvolvimento;
+- `low`: tarefas mecânicas, cópia, renomeação ou substituições simples;
+- `high`: raciocínio complexo, regras críticas ou tarefas onde errar custa caro.
+
+A prioridade aplicada é: velocidade fixa do projeto > `esforco` da tarefa > modo. Quando a velocidade é `rapido`, `medio` ou `demorado`, o esforço de todas as tarefas fica fixado pelo projeto e o campo individual é ignorado.
+
+A função `comEsforco` ajusta as entradas das cadeias:
+- Em `claude:<modelo>`, define `claude:<modelo>@<esforco>`, exceto para variantes do Haiku (`claude:haiku`, `claude:claude-haiku-5-5`), que permanecem sem `@`.
+- Em `agy:gemini-*-*` e `agy:claude-*-*`, troca o sufixo final para o novo esforço (exemplo: `agy:gemini-3.8-flash-high` vira `agy:gemini-3.8-flash-low`). Modelos sem sufixo de esforço, como `agy:gpt-oss-120b-medium`, e modelos do `opencode:` permanecem inalterados.
+- Caso a troca resulte em modelos repetidos na mesma cadeia, os duplicados são removidos mantendo a ordem de preferência.
+- Tarefas com cadeia explícita definida pelo planejador (`cadeia`) são preservadas sem alteração em qualquer velocidade.
 
 ### Perfis salvos
 

@@ -102,6 +102,16 @@ const SUPERVISAO = {
 };
 
 const temSup = (k) => typeof k === 'string' && Object.hasOwn(SUPERVISAO, k);
+
+const VELOCIDADE = {
+  auto: 'Automático: esforço sugerido pelo planejador por tarefa; integração e verificação em médio (ou alto no modo agressivo).',
+  rapido: 'Rápido: executores em esforço baixo (low); integração e verificação em médio (medium).',
+  medio: 'Médio: executores, integração e verificação em esforço médio (medium).',
+  demorado: 'Demorado: executores, integração e verificação em esforço alto (high).',
+};
+
+const temVel = (k) => typeof k === 'string' && Object.hasOwn(VELOCIDADE, k);
+const velDe = (p) => (temVel(p?.velocidade) ? p.velocidade : 'auto');
 // Modo personalizado: mesmas chaves de um modo pronto, com listas planas.
 function validarCustom(c) {
   const errs = [];
@@ -156,13 +166,55 @@ function slug(s) {
 }
 
 // ---------- cadeias ----------
+function comEsforco(entrada, nivel) {
+  if (!['low', 'medium', 'high'].includes(nivel)) return entrada;
+  if (Array.isArray(entrada)) {
+    return [...new Set(entrada.map((e) => comEsforco(e, nivel)))];
+  }
+  if (typeof entrada !== 'string') return entrada;
+  if (entrada.startsWith('claude:')) {
+    const semProv = entrada.slice('claude:'.length);
+    const [model] = semProv.split('@');
+    if (model.toLowerCase().includes('haiku')) return `claude:${model}`;
+    return `claude:${model}@${nivel}`;
+  }
+  const m = entrada.match(/^agy:((?:gemini|claude)(?:-.+)?)-(?:low|medium|high)$/);
+  if (m) {
+    return `agy:${m[1]}-${nivel}`;
+  }
+  return entrada;
+}
+
+function esforcoIntegracaoVerificacao(p) {
+  const vel = velDe(p);
+  if (vel === 'rapido' || vel === 'medio') return 'medium';
+  if (vel === 'demorado') return 'high';
+  return p?.modo === 'agressivo' ? null : 'medium';
+}
+
+function esforcoDaTarefa(p, t) {
+  if (t?.tipo === 'integrador') return esforcoIntegracaoVerificacao(p);
+  const vel = velDe(p);
+  if (vel === 'rapido') return 'low';
+  if (vel === 'medio') return 'medium';
+  if (vel === 'demorado') return 'high';
+  if (t?.esforco && ['low', 'medium', 'high'].includes(t.esforco)) return t.esforco;
+  return null;
+}
+
 // Cadeia do modo para a tarefa, adaptada ao que está instalado e com os dois melhores gratuitos no fim como última reserva.
-function chainFor(p, t, idx) {
+function chainFor(p, t, idx = 0) {
   const m = cfgDe(p);
   let c;
-  if (Array.isArray(t.cadeia) && t.cadeia.length) c = t.cadeia;
-  else { const tier = m.tiers[t.nivel] || m.tiers.volume; c = Array.isArray(tier[0]) ? tier[idx % tier.length] : tier; }
-  return comReserva(adaptar(c));
+  if (Array.isArray(t?.cadeia) && t.cadeia.length) c = t.cadeia;
+  else {
+    const tier = m?.tiers?.[t?.nivel] || m?.tiers?.volume || [];
+    c = Array.isArray(tier[0]) ? tier[idx % tier.length] : tier;
+    const esf = esforcoDaTarefa(p, t);
+    if (esf) c = comEsforco(c, esf);
+  }
+  const adaptada = comReserva(adaptar(c));
+  return adaptada.length ? adaptada : c;
 }
 function comReserva(c) {
   const extra = adaptar(DESESPERO.slice(0, 2), []).filter((e) => !c.includes(e));
@@ -257,8 +309,12 @@ async function runAgy({ cwd, model, effort, prompt, bare, entry }) {
 
 function introducao(p) {
   const m = cfgDe(p);
+  const vel = velDe(p);
+  const velTxt = vel === 'auto'
+    ? 'Velocidade: auto (defina o esforço "low", "medium" ou "high" em cada tarefa do plano).'
+    : `Velocidade: ${vel} (o esforço da execução já está fixado pelo usuário; o campo esforco nas tarefas será ignorado).`;
   return `Pedido do usuário:\n${p.pedido}\n\nRepositório: ${p.repo} (${isGitRepo(p.repo) ? 'git' : 'não é git: não use escritores'})\n` +
-    `Cofre de conhecimento: ${VAULT}\nModo: ${m.nome}. ${m.descricao}\nAcompanhamento: ${SUPERVISAO[supDe(p)]}\n` +
+    `Cofre de conhecimento: ${VAULT}\nModo: ${m.nome}. ${m.descricao}\n${velTxt}\nAcompanhamento: ${SUPERVISAO[supDe(p)]}\n` +
     `Provedores instalados neste PC: ${Object.entries(detectar()).filter(([, v]) => v).map(([k]) => k).join(', ') || 'nenhum'}\n` +
     (p.auto ? '\nMODO AUTOMÁTICO: não faça perguntas. Analise o necessário e entregue já nesta resposta o plano final no formato combinado.'
       : '\nConverse para fechar o escopo. Se o pedido já estiver claro, proponha o plano final no formato combinado.');
@@ -302,13 +358,18 @@ function repararJson(bruto) {
   let s = String(bruto).replace(/^\uFEFF/, '');
   const i = s.indexOf('{'), j = s.lastIndexOf('}');
   if (i >= 0 && j > i) s = s.slice(i, j + 1);
-  let out = '', dentro = false, esc = false, tipografica = false;
+  let out = '', dentro = false, esc = false, tipografica = false, chave = false;
   for (let k = 0; k < s.length; k++) {
     let c = s[k];
     if (dentro) {
-      if (esc) { esc = false; out += c; continue; }
+      if (esc) { esc = false; if (!'nrt"\\/bfu'.includes(c)) out += '\\'; out += c; continue; } // "\x" inválido vira "\\x"
       if (c === '\\') { esc = true; out += c; continue; }
-      if (c === '"' || (tipografica && c === '”')) { dentro = false; out += '"'; continue; }
+      if (c === '"' || (tipografica && c === '”')) {
+        // Aspas que não fecham de verdade são do texto: escapa. Chave fecha antes de ":"; valor, antes de , } ou ].
+        let n = k + 1; while (n < s.length && /\s/.test(s[n])) n++;
+        if (n < s.length && !(chave ? ':' : ',}]').includes(s[n])) { out += '\\"'; continue; }
+        dentro = false; out += '"'; continue;
+      }
       if (c === '\n') { out += '\\n'; continue; }
       if (c === '\r') continue;
       if (c === '\t') { out += '\\t'; continue; }
@@ -317,7 +378,7 @@ function repararJson(bruto) {
     }
     tipografica = c === '\u201c';
     if (c === '\u201c' || c === '\u201d') c = '"';
-    if (c === '"') { dentro = true; out += c; continue; }
+    if (c === '"') { dentro = true; chave = /[{,]$/.test(out.trimEnd()); out += c; continue; }
     if (c === ',') { let n = k + 1; while (n < s.length && /\s/.test(s[n])) n++; if (s[n] === '}' || s[n] === ']') continue; }
     out += c;
   }
@@ -326,9 +387,17 @@ function repararJson(bruto) {
 
 function extractPlan(text) {
   const t = String(text);
-  const blocks = [...t.matchAll(/```json\s*([\s\S]*?)```/g)];
-  let bruto = blocks.length ? blocks[blocks.length - 1][1] : null;
-  if (bruto == null) { const a = t.lastIndexOf('```json'); if (a < 0) return { plan: null }; bruto = t.slice(a + 7); } // bloco sem fecho
+  const a = t.lastIndexOf('```json');
+  if (a < 0) return { plan: null };
+  // O prompt de uma tarefa pode ter ``` dentro; o fecho certo é aquele em que o JSON fecha.
+  // Tenta do fecho mais distante para o mais próximo; sem fecho, vai até o fim do texto.
+  const fins = []; for (let k = t.indexOf('```', a + 7); k >= 0; k = t.indexOf('```', k + 3)) fins.push(k);
+  for (const f of [...fins].reverse()) {
+    const b = t.slice(a + 7, f);
+    try { return { plan: JSON.parse(b) }; } catch {}
+    try { return { plan: JSON.parse(repararJson(b)), reparo: 'local' }; } catch {}
+  }
+  const bruto = fins.length ? t.slice(a + 7, fins[fins.length - 1]) : t.slice(a + 7);
   try { return { plan: JSON.parse(bruto) }; }
   catch (e) {
     try { return { plan: JSON.parse(repararJson(bruto)), reparo: 'local' }; }
@@ -358,6 +427,11 @@ async function corrigirJson(p, bruto, erro) {
       save(p);
       if (!r.ok) continue;
       const x = extractPlan(r.text);
+      // O corretor não pode perder tarefas: todo id do plano original tem de continuar lá.
+      const idsOrig = [...String(bruto).matchAll(/"id"\s*:\s*"([a-z0-9_-]{1,32})"/g)].map((m) => m[1]);
+      const idsNovos = new Set((x.plan?.tarefas || []).map((t) => t?.id));
+      const faltam = idsOrig.filter((id) => !idsNovos.has(id));
+      if (x.plan && faltam.length) { evento(p, { tipo: 'planejador', modelo: entry, texto: `corretor descartado: sumiram as tarefas ${faltam.join(', ')}` }); continue; }
       if (x.plan) return { plan: x.plan, entry };
     } catch (e) { console.error('corrigirJson', entry, e); }
   }
@@ -376,6 +450,7 @@ function validatePlan(pl, isGit) {
     ids.add(t.id);
     if (!TIPOS.includes(t.tipo)) errs.push(`${t.id}: tipo inválido`);
     if (!NIVEIS.includes(t.nivel)) errs.push(`${t.id}: nível inválido`);
+    if (t.esforco != null && !['low', 'medium', 'high'].includes(t.esforco)) errs.push(`${t.id}: esforço inválido`);
     if (typeof t.prompt !== 'string' || t.prompt.length < 20) errs.push(`${t.id}: prompt vazio`);
     else if (t.prompt.length > 25000) errs.push(`${t.id}: prompt longo demais`);
     if (t.tipo === 'escritor' && !isGit) errs.push(`${t.id}: escritor exige repositório git`);
@@ -482,9 +557,15 @@ function buildPlanFile(p) {
     return o;
   });
   const vol0 = Array.isArray(m.tiers.volume[0]) ? m.tiers.volume[0] : m.tiers.volume;
+  const esfIv = esforcoIntegracaoVerificacao(p);
+  const fixChain = esfIv ? comEsforco(m.fix, esfIv) : m.fix;
+  const coordChain = esfIv ? comEsforco(m.coord, esfIv) : m.coord;
+  const vel = velDe(p);
+  const esfExec = vel === 'rapido' ? 'low' : (vel === 'medio' ? 'medium' : (vel === 'demorado' ? 'high' : null));
+  const chainBase = esfExec ? comEsforco(vol0, esfExec) : vol0;
   const plan = {
     name: p.id, repo: p.repo, worktreeRoot: p.repo + '-wt', logDir: path.join(dir, 'logs'),
-    chain: comReserva(adaptar(vol0)), fixChain: comReserva(adaptar(m.fix)), coordinatorChain: comReserva(adaptar(m.coord)),
+    chain: comReserva(adaptar(chainBase)), fixChain: comReserva(adaptar(fixChain)), coordinatorChain: comReserva(adaptar(coordChain)),
     desperateChain: adaptar(desesperoEfetivo(), []), supervision: supDe(p),
     maxConcurrent: paralelismo(p, m),
     maxRecoveries: 2, verify: (p.plano.verify || []).filter((v) => typeof v === 'string' && v.trim()), tasks,
@@ -522,10 +603,10 @@ function startPipeline(p, resume = false) {
   p.estado = 'executando';
   if (!resume) p.inicio = now();
   p.fim = null;
-  p.mensagens.push({ papel: 'sistema', texto: resume ? 'Execução retomada.' : `Execução iniciada (modo ${nomeModo(p)}, acompanhamento ${supDe(p)}, até ${paralelismo(p, cfgDe(p))} tarefas ao mesmo tempo, conforme a cota).`, quando: now() });
+  p.mensagens.push({ papel: 'sistema', texto: resume ? 'Execução retomada.' : `Execução iniciada (modo ${nomeModo(p)}, velocidade ${velDe(p)}, acompanhamento ${supDe(p)}, até ${paralelismo(p, cfgDe(p))} tarefas ao mesmo tempo, conforme a cota).`, quando: now() });
   save(p);
   report(p);
-  if (!resume) logDiario(p, 'Iniciado', [`**Iniciado:** execução do plano (${p.plano.tarefas.length} tarefas, modo ${nomeModo(p)}) em \`${p.repo}\`.`]);
+  if (!resume) logDiario(p, 'Iniciado', [`**Iniciado:** execução do plano (${p.plano.tarefas.length} tarefas, modo ${nomeModo(p)}, velocidade ${velDe(p)}) em \`${p.repo}\`.`]);
   return p;
 }
 
@@ -644,7 +725,7 @@ async function atividade(p) {
       const agora = v.state === 'running' ? agoraNaTarefa(p, v.note === 'fixing' ? id + '-fix' : id) : null;
       return { id, titulo: tarefas[id]?.titulo || '', estado: v.state, modelo: agora?.modelo || v.model || null, desde: v.started, nota: v.note, agora };
     });
-  return { id: p.id, titulo: p.titulo, estado: p.estado, ocupado: !!p.ocupado, modo: nomeModo(p), supervisao: supDe(p), desespero: run.desespero,
+  return { id: p.id, titulo: p.titulo, estado: p.estado, ocupado: !!p.ocupado, modo: nomeModo(p), velocidade: velDe(p), supervisao: supDe(p), desespero: run.desespero,
     rodando, gates: run.gates, eventos: eventos(p), commits: await commitsRecentes(p.repo) };
 }
 
@@ -1302,7 +1383,7 @@ function report(p, run) {
     run = run || readRun(p);
     const dir = path.join(VAULT, 'orquestracao'); fs.mkdirSync(dir, { recursive: true });
     const L = [`# Orquestração: ${p.titulo}`, '',
-      `- **Projeto Delegar:** \`${p.id}\` · **Modo:** ${nomeModo(p)} · **Acompanhamento:** ${supDe(p)} · **Estado:** ${p.estado}`,
+      `- **Projeto Delegar:** \`${p.id}\` · **Modo:** ${nomeModo(p)} · **Velocidade:** ${velDe(p)} · **Acompanhamento:** ${supDe(p)} · **Estado:** ${p.estado}`,
       `- **Planejador:** ${p.planejador || '-'}`,
       `- **Repositório:** \`${p.repo}\``,
       `- **Criado:** ${p.criado} · **Início:** ${p.inicio || '-'} · **Fim:** ${p.fim || '-'}`, '',
@@ -1418,7 +1499,7 @@ function desarquivarSePreciso(p) {
   evento(p, { tipo: 'projeto', texto: 'desarquivado' });
 }
 function publicView(p, full) {
-  const v = { id: p.id, titulo: p.titulo, modo: p.modo, modoNome: nomeModo(p), supervisao: supDe(p), estado: p.estado, auto: p.auto, repo: p.repo, criado: p.criado, inicio: p.inicio, fim: p.fim, ocupado: !!p.ocupado, arquivado: !!p.arquivado, perfil: p.perfil || null };
+  const v = { id: p.id, titulo: p.titulo, modo: p.modo, modoNome: nomeModo(p), velocidade: velDe(p), supervisao: supDe(p), estado: p.estado, auto: p.auto, repo: p.repo, criado: p.criado, inicio: p.inicio, fim: p.fim, ocupado: !!p.ocupado, arquivado: !!p.arquivado, perfil: p.perfil || null };
   if (!full) { v.gates = p.estado === 'executando' ? gatesPendentes(p).length : 0; return v; }
   v.pedido = p.pedido; v.mensagens = p.mensagens; v.planejador = p.planejador || null;
   v.config = modoPublico(p); v.plannerEfetivo = adaptar(cfgDe(p).planner);
@@ -1595,7 +1676,7 @@ async function api(req, res, url) {
   if (!safeEq(req.headers['x-delegar-token'] || '', TOKEN)) return send(res, 401, { erro: 'token inválido' });
   if (req.method === 'GET' && parts[1] === 'modos') {
     const modos = Object.fromEntries(Object.entries(MODES).map(([k, m]) => [k, { nome: m.nome, descricao: m.descricao, tiers: m.tiers, planner: m.planner, fix: m.fix, coord: m.coord, maxConcurrent: m.maxConcurrent, plannerEfetivo: adaptar(m.planner) }]));
-    return send(res, 200, { modos, supervisao: SUPERVISAO, ultimoPersonalizado: lerJson(CUSTOM_FILE), padraoPersonalizado: modoComoCustom('padrao') });
+    return send(res, 200, { modos, supervisao: SUPERVISAO, velocidade: VELOCIDADE, ultimoPersonalizado: lerJson(CUSTOM_FILE), padraoPersonalizado: modoComoCustom('padrao') });
   }
   if (parts[1] === 'perfis') return await rotaPerfis(req, res, parts);
   if (parts[1] === 'cotas') return await rotaCotas(req, res, parts);
@@ -1653,10 +1734,12 @@ async function api(req, res, url) {
     const pedido = String(b.pedido || '').trim(); const repo = path.resolve(String(b.repo || ''));
     if (pedido.length < 5 || pedido.length > 50000) return send(res, 400, { erro: 'pedido vazio ou longo demais' });
     if (!b.repo || !fs.existsSync(repo) || !fs.statSync(repo).isDirectory()) return send(res, 400, { erro: 'repositório não encontrado' });
+    if (b.velocidade != null && !temVel(b.velocidade)) return send(res, 400, { erro: 'velocidade inválida' });
     const titulo = String(b.titulo || pedido.split('\n')[0]).slice(0, 120);
     const d = new Date(); const z = (n) => String(n).padStart(2, '0');
     const stamp = `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}${z(d.getHours())}${z(d.getMinutes())}`;
     const p = { id: `${stamp}-${slug(titulo)}-${crypto.randomBytes(2).toString('hex')}`, titulo, tituloFixo: !!b.titulo, pedido, repo, modo: 'padrao', auto: !!b.auto,
+      velocidade: temVel(b.velocidade) ? b.velocidade : 'auto',
       supervisao: temSup(b.supervisao) ? b.supervisao : 'automatico',
       criado: now(), estado: 'planejando', mensagens: [{ papel: 'usuario', texto: pedido, quando: now() }], sessao: null, plano: null, uso: { chamadas: [] } };
     const erro = aplicarModo(p, { modo: b.modo || 'padrao', custom: b.custom, perfil: b.perfil });
@@ -1705,7 +1788,11 @@ async function api(req, res, url) {
       return send(res, 202, { ok: true });
     }
     case 'ajustes': {
-      if (running && (b.modo != null || b.perfil != null || b.niveis != null || typeof b.auto === 'boolean')) return send(res, 409, { erro: 'execução em andamento' });
+      if (running && (b.modo != null || b.perfil != null || b.niveis != null || b.esforcos != null || typeof b.auto === 'boolean' || b.velocidade != null)) return send(res, 409, { erro: 'execução em andamento' });
+      if (b.velocidade != null) {
+        if (!temVel(b.velocidade)) return send(res, 400, { erro: 'velocidade inválida' });
+        p.velocidade = b.velocidade;
+      }
       if (b.supervisao != null) {
         if (!temSup(b.supervisao)) return send(res, 400, { erro: 'acompanhamento desconhecido' });
         p.supervisao = b.supervisao; // vale também durante a execução, nas próximas confirmações
@@ -1714,6 +1801,7 @@ async function api(req, res, url) {
       if (b.modo != null || b.perfil != null) { const erro = aplicarModo(p, b); if (erro) return send(res, 400, { erro }); }
       if (typeof b.auto === 'boolean') p.auto = b.auto;
       if (p.plano && b.niveis && typeof b.niveis === 'object') for (const t of p.plano.tarefas) if (NIVEIS.includes(b.niveis[t.id])) t.nivel = b.niveis[t.id];
+      if (p.plano && b.esforcos && typeof b.esforcos === 'object') for (const t of p.plano.tarefas) if (['low', 'medium', 'high'].includes(b.esforcos[t.id])) t.esforco = b.esforcos[t.id];
       save(p); report(p);
       return send(res, 200, publicView(p, true));
     }

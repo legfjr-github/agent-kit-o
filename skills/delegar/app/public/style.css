@@ -82,7 +82,7 @@ td pre { white-space: pre-wrap; max-height: 300px; overflow: auto; font-size: 12
 .lista details.arquivados > summary { cursor: pointer; list-style-position: inside; margin: 0 2px 6px; }
 .lista button.mais { display: block; padding: 4px 2px; margin: 0 0 6px; border: 0; background: none; color: var(--accent); font-size: 13px; }
 .lista button:disabled { opacity: .5; }
-.duas { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.duas { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
 .papel { padding: 10px 0; border-bottom: 1px solid var(--line); }
 .papel > strong { display: block; font-size: 13px; margin-bottom: 6px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }

@@ -521,6 +521,116 @@ test('cotas: GET /api/projetos/<inexistente>/cotas é 404, também com id malfor
   assert.equal((await get('/api/projetos/..%2Fx/cotas')).status, 404);
 });
 
+test('GET /api/modos retorna velocidade com auto, rapido, medio e demorado', async () => {
+  const r = await get('/api/modos');
+  assert.equal(r.status, 200);
+  assert.ok(r.json && typeof r.json.velocidade === 'object', 'traz velocidade');
+  assert.deepEqual(Object.keys(r.json.velocidade).sort(), ['auto', 'demorado', 'medio', 'rapido']);
+  for (const k of ['auto', 'rapido', 'medio', 'demorado']) {
+    assert.equal(typeof r.json.velocidade[k], 'string');
+    assert.ok(r.json.velocidade[k].length > 0);
+  }
+});
+
+test('POST /api/projetos valida campo velocidade com seguranca', async () => {
+  const invalidos = ['lento', '__proto__', 'constructor', '<script>alert(1)</script>', '', 123];
+  for (const vel of invalidos) {
+    const r = await post('/api/projetos', { pedido: 'Criar teste de velocidade completo', repo: REPO, velocidade: vel });
+    assert.equal(r.status, 400, `recusa velocidade ${JSON.stringify(vel)}`);
+    assert.equal(r.json.erro, 'velocidade inválida');
+    assert.ok(!r.txt.includes('<script>'), 'não ecoa script');
+    assert.ok(!r.txt.includes('lento'), 'não ecoa valor enviado');
+  }
+
+  for (const vel of ['rapido', 'medio', 'demorado', 'auto']) {
+    const r = await post('/api/projetos', { pedido: 'Criar teste de velocidade completo', repo: REPO, velocidade: vel });
+    assert.equal(r.status, 400);
+    assert.match(r.json.erro, /nenhuma CLI de IA/);
+  }
+});
+
+test('POST /api/projetos/:id/ajustes altera velocidade e atualiza cadeiaEfetiva', async () => {
+  const id = '202611131900-ajustes-vel-99aa';
+  const dir = path.join(DATA, 'projects', id);
+  fs.mkdirSync(path.join(dir, 'logs'), { recursive: true });
+  const t = new Date().toISOString();
+  const arq = path.join(dir, 'project.json');
+  const proj = {
+    id,
+    titulo: 'Projeto teste velocidade ajustes',
+    pedido: 'fazer ajuste de velocidade no plano',
+    repo: REPO,
+    modo: 'padrao',
+    velocidade: 'auto',
+    supervisao: 'automatico',
+    criado: t,
+    estado: 'conversando',
+    pid: 0,
+    mensagens: [],
+    sessao: null,
+    plano: {
+      tarefas: [
+        { id: 't1', titulo: 'Escritor', tipo: 'escritor', nivel: 'volume', prompt: 'prompt de teste com tamanho suficiente para escritor', depende: [] },
+        { id: 't2', titulo: 'Integrador', tipo: 'integrador', nivel: 'pesado', prompt: 'prompt de teste com tamanho suficiente para integrador', depende: ['t1'] },
+      ],
+    },
+  };
+  fs.writeFileSync(arq, JSON.stringify(proj, null, 2), 'utf8');
+
+  try {
+    for (const inv of ['lento', '__proto__', '<script>alert(1)</script>', '', 123]) {
+      const r = await post(`/api/projetos/${id}/ajustes`, { velocidade: inv });
+      assert.equal(r.status, 400, `recusa velocidade ${JSON.stringify(inv)}`);
+      assert.equal(r.json.erro, 'velocidade inválida');
+      assert.ok(!r.txt.includes('<script>'), 'não ecoa script');
+      assert.ok(!r.txt.includes('lento'), 'não ecoa valor');
+    }
+
+    for (const vel of ['rapido', 'medio', 'demorado', 'auto']) {
+      const r = await post(`/api/projetos/${id}/ajustes`, { velocidade: vel });
+      assert.equal(r.status, 200, `aceita velocidade ${vel}`);
+      assert.equal(r.json.velocidade, vel);
+
+      const salvo = JSON.parse(fs.readFileSync(arq, 'utf8'));
+      assert.equal(salvo.velocidade, vel);
+
+      const getProj = await get(`/api/projetos/${id}`);
+      assert.equal(getProj.status, 200);
+      assert.equal(getProj.json.velocidade, vel);
+      const tarefas = getProj.json.plano.tarefas;
+      assert.equal(tarefas.length, 2);
+      const [t1, t2] = tarefas;
+      assert.ok(Array.isArray(t1.cadeiaEfetiva) && t1.cadeiaEfetiva.length > 0);
+      assert.ok(Array.isArray(t2.cadeiaEfetiva) && t2.cadeiaEfetiva.length > 0);
+
+      if (vel === 'rapido') {
+        assert.ok(t1.cadeiaEfetiva.some((m) => m.includes('-low') || m.includes('@low')));
+        assert.ok(t2.cadeiaEfetiva.some((m) => m.includes('-medium') || m.includes('@medium')));
+      } else if (vel === 'medio') {
+        assert.ok(t1.cadeiaEfetiva.some((m) => m.includes('-medium') || m.includes('@medium')));
+        assert.ok(t2.cadeiaEfetiva.some((m) => m.includes('-medium') || m.includes('@medium')));
+      } else if (vel === 'demorado') {
+        assert.ok(t1.cadeiaEfetiva.some((m) => m.includes('-high') || m.includes('@high')));
+        assert.ok(t2.cadeiaEfetiva.some((m) => m.includes('-high') || m.includes('@high')));
+      }
+
+      const listProj = await get('/api/projetos');
+      assert.equal(listProj.status, 200);
+      const item = listProj.json.find((p) => p.id === id);
+      assert.ok(item, 'projeto aparece na listagem');
+      assert.equal(item.velocidade, vel);
+    }
+
+    proj.estado = 'executando';
+    fs.writeFileSync(arq, JSON.stringify(proj, null, 2), 'utf8');
+    const rExec = await post(`/api/projetos/${id}/ajustes`, { velocidade: 'medio' });
+    assert.equal(rExec.status, 409);
+    assert.equal(rExec.json.erro, 'execução em andamento');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('painel segue de pé no fim', async () => {
   assert.equal((await get('/api/saude', { token: null })).status, 200);
   assert.equal(filho.exitCode, null, 'o processo do servidor continua rodando');

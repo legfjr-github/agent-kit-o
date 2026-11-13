@@ -17,7 +17,8 @@ const ESTADOS = { planejando: 'planejando', conversando: 'conversando', plano_pr
 const TAREFA = { pending: 'na fila', waiting: 'aguardando confirmação', running: 'rodando', done: 'concluída', failed: 'falhou', skipped: 'pulada' };
 const PAPEIS = [['planner', 'Planejador'], ['pesado', 'Nível pesado'], ['volume', 'Nível volume'], ['leve', 'Nível leve'], ['fix', 'Correção'], ['coord', 'Coordenador de falhas']];
 const ESFORCOS = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
-let MODES = {}, SUP = {}, CAT = { modelos: [], provedores: {} }, ULTIMO = null, PADRAO_CUSTOM = null;
+const VEL_PADRAO = { auto: 'Automático: esforço sugerido pelo planejador por tarefa; integração e verificação em médio (ou alto no modo agressivo).', rapido: 'Rápido: executores em esforço baixo (low); integração e verificação em médio (medium).', medio: 'Médio: executores, integração e verificação em esforço médio (medium).', demorado: 'Demorado: executores, integração e verificação em esforço alto (high).' };
+let MODES = {}, SUP = {}, VEL = { ...VEL_PADRAO }, CAT = { modelos: [], provedores: {} }, ULTIMO = null, PADRAO_CUSTOM = null;
 let atual = null, ultimoMsgs = -1, timer = null, vista = 'vazio', projAtual = null;
 const promptsAbertos = new Set();   // prompts de tarefa abertos: a tabela é refeita a cada 4 s e não pode fechá-los
 let novoCfg = null, projCfg = null;
@@ -40,6 +41,7 @@ function fillModes(sel) {
   sel.replaceChildren(...Object.entries(MODES).map(([k, m]) => el('option', { value: k, text: m.nome })), el('option', { value: 'personalizado', text: 'Personalizado' }));
 }
 function fillSup(sel) { sel.replaceChildren(...Object.keys(SUP).map((k) => el('option', { value: k, text: SUP[k].split(':')[0] }))); }
+function fillVel(sel) { sel.replaceChildren(...Object.keys(VEL).map((k) => el('option', { value: k, text: VEL[k].split(':')[0], title: VEL[k] }))); }
 function show(id) { vista = id; for (const s of ['vazio', 'novo', 'proj', 'atividade', 'cotas']) $(s).classList.toggle('hidden', s !== id); }
 
 // ---------- editor de modo ----------
@@ -327,6 +329,9 @@ function render(p) {
   if (document.activeElement !== $('pModo')) $('pModo').value = p.modo;
   $('pModo').disabled = rodando;
   if (document.activeElement !== $('pSup')) $('pSup').value = p.supervisao;
+  if (document.activeElement !== $('pVel')) $('pVel').value = p.velocidade || 'auto';
+  $('pVel').disabled = rodando;
+  $('pVel').title = VEL[p.velocidade || 'auto'] || '';
   $('pModelos').textContent = rodando ? 'Ver modelos' : 'Modelos';
   $('pAprovar').classList.toggle('hidden', !p.plano || rodando);
   $('pAprovar').textContent = ['concluido', 'incompleto', 'cancelado', 'interrompido'].includes(p.estado) ? 'Executar o plano de novo' : 'Aprovar e iniciar';
@@ -856,6 +861,7 @@ $('nCancelar').onclick = () => show('vazio');
 function descNovo() {
   const k = $('nModo').value;
   $('nModoDesc').textContent = k === 'personalizado' ? 'Personalizado: escolha os modelos de cada papel em "Ver e mudar os modelos", do zero ou a partir de um modo pronto.' : MODES[k]?.descricao || '';
+  $('nVelDesc').textContent = VEL[$('nVel').value] || '';
   $('nSupDesc').textContent = SUP[$('nSup').value] || '';
 }
 $('nModo').onchange = () => {
@@ -865,13 +871,14 @@ $('nModo').onchange = () => {
   if (k === 'personalizado') $('nModelosBox').open = true;
   descNovo(); fluxoNovo();
 };
+$('nVel').onchange = descNovo;
 $('nSup').onchange = descNovo;
 $('nCriar').onclick = async () => {
   $('nErro').textContent = ''; $('nCriar').disabled = true;
   try {
     const modo = $('nModo').value;
     const p = await call('POST', '/api/projetos', { titulo: $('nTitulo').value.trim() || undefined, repo: $('nRepo').value.trim(), modo, perfil: novoPerfil || undefined, custom: modo === 'personalizado' && !novoPerfil ? novoCfg : undefined,
-      supervisao: $('nSup').value, auto: $('nAuto').checked, pedido: $('nPedido').value });
+      velocidade: $('nVel').value, supervisao: $('nSup').value, auto: $('nAuto').checked, pedido: $('nPedido').value });
     try { localStorage.setItem('delegar.repo', $('nRepo').value.trim()); } catch {}
     $('nPedido').value = ''; $('nTitulo').value = '';
     abrir(p.id);
@@ -891,6 +898,7 @@ $('pModo').onchange = async () => {
   } catch (e) { alert(e.message); }
 };
 $('pSup').onchange = async () => { try { await call('POST', `/api/projetos/${atual}/ajustes`, { supervisao: $('pSup').value }); refresh(); } catch (e) { alert(e.message); } };
+$('pVel').onchange = async () => { try { await call('POST', `/api/projetos/${atual}/ajustes`, { velocidade: $('pVel').value }); refresh(); } catch (e) { alert(e.message); } };
 function aoMudarProj() { $('pModo').value = 'personalizado'; const ps = $('pPerfil'); if (ps) ps.value = ''; }
 function abrirEditor(force) {
   if (!projAtual) return;
@@ -936,13 +944,13 @@ $('pExcluir').onclick = async () => {
 
 (async () => {
   const [mo, cat] = await Promise.all([call('GET', '/api/modos'), call('GET', '/api/modelos'), carregarPerfis()]);
-  MODES = mo.modos; SUP = mo.supervisao; ULTIMO = mo.ultimoPersonalizado; PADRAO_CUSTOM = mo.padraoPersonalizado; CAT = cat;
+  MODES = mo.modos; SUP = mo.supervisao; VEL = mo.velocidade || VEL_PADRAO; ULTIMO = mo.ultimoPersonalizado; PADRAO_CUSTOM = mo.padraoPersonalizado; CAT = cat;
   $('provs').replaceChildren(...Object.entries(CAT.provedores).map(([k, v]) => el('span', { class: 'prov ' + (v ? 'ok' : 'nao'), text: k, title: v ? 'instalado' : 'não encontrado neste PC' })));
-  fillModes($('nModo')); fillModes($('pModo')); fillSup($('nSup')); fillSup($('pSup'));
+  fillModes($('nModo')); fillModes($('pModo')); fillVel($('nVel')); fillVel($('pVel')); fillSup($('nSup')); fillSup($('pSup'));
   montarBarras();
   ligarFluxo($('nFluxoRow'), $('nFluxoBtn'), $('nFluxo'), dadosFluxoNovo);
   ligarFluxo($('pFluxoRow'), $('pFluxoBtn'), $('pFluxo'), () => (projAtual ? dadosFluxoProj(projAtual) : null));
-  $('nModo').value = 'padrao'; $('nSup').value = 'automatico'; descNovo();
+  $('nModo').value = 'padrao'; $('nVel').value = 'auto'; $('nSup').value = 'automatico'; descNovo();
   try { const r = localStorage.getItem('delegar.repo'); if (r) $('nRepo').value = r; } catch {}
   const selPer = $('usoPeriodo');
   if (selPer) {
@@ -955,6 +963,7 @@ $('pExcluir').onclick = async () => {
   $('modosInfo').replaceChildren(
     ...Object.values(MODES).map((m) => el('div', {}, el('strong', { text: m.nome }), el('p', { class: 'hint', text: m.descricao }), el('p', { class: 'hint mono', text: 'Planejador neste PC: ' + (m.plannerEfetivo[0] || 'nenhum instalado') }))),
     el('div', {}, el('strong', { text: 'Personalizado' }), el('p', { class: 'hint', text: 'Escolha os modelos de cada papel do zero, ou parta de um modo pronto e troque o que quiser.' })),
+    el('div', {}, el('strong', { text: 'Velocidade' }), ...Object.values(VEL).map((d) => el('p', { class: 'hint', text: d }))),
     el('div', {}, el('strong', { text: 'Acompanhamento' }), ...Object.values(SUP).map((d) => el('p', { class: 'hint', text: d }))));
   const h = location.hash.slice(1);
   await carregarLista();

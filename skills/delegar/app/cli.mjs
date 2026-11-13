@@ -2,7 +2,7 @@
 // CLI do Delegar. Uso:
 //   node cli.mjs iniciar                         sobe o painel (se não estiver no ar) e mostra o endereço
 //   node cli.mjs novo --repo <pasta> [--modo padrao|equilibrado|agressivo|desespero|personalizado]
-//        [--personalizado modo.json | --perfil <nome>] [--acompanhamento automatico|acompanhado|passo] [--auto] [--titulo T] "pedido"
+//        [--personalizado modo.json | --perfil <nome>] [--velocidade auto|rapido|medio|demorado] [--acompanhamento automatico|acompanhado|passo] [--auto] [--titulo T] "pedido"
 //   node cli.mjs msg <id> "texto"                conversa com o planejador
 //   node cli.mjs plano <id>                      pede o plano final
 //   node cli.mjs ver <id>                        mostra conversa recente, plano e estado
@@ -12,6 +12,7 @@
 //   node cli.mjs perfis salvar <nome> --personalizado modo.json [--sobrescrever]   salva um perfil (nome repetido dá erro sem --sobrescrever)
 //   node cli.mjs perfis renomear <de> <para> | perfis excluir <nome>
 //   node cli.mjs acompanhamento <id> <automatico|acompanhado|passo>   vale também durante a execução
+//   node cli.mjs velocidade <id> <auto|rapido|medio|demorado>   troca a velocidade antes de aprovar
 //   node cli.mjs aprovar <id> | retomar <id> | cancelar <id>
 //   node cli.mjs confirmar <id> <confirmação> [sim|nao]   responde a uma parada do modo acompanhado
 //   node cli.mjs atividade [id]                  quem está fazendo o quê agora e as últimas atualizações
@@ -80,13 +81,13 @@ const lerCustom = (f) => (f ? JSON.parse(fs.readFileSync(f, 'utf8')) : undefined
 const TAREFA = { pending: 'na fila', waiting: 'aguardando confirmação', running: 'rodando', done: 'concluída', failed: 'falhou', skipped: 'pulada' };
 
 function mostrar(p, n = 3) {
-  console.log(`${p.titulo}\n  id: ${p.id}\n  estado: ${p.estado}${p.ocupado ? ' (planejador pensando)' : ''} · modo: ${p.modoNome} · acompanhamento: ${p.supervisao}${p.auto ? ' · automático' : ''}${p.run?.desespero ? ' · MODO DESESPERO' : ''}\n  planejador: ${p.planejador || (p.plannerEfetivo || [])[0] || '-'}\n  repo: ${p.repo}\n  painel: ${BASE}/#${p.id}`);
+  console.log(`${p.titulo}\n  id: ${p.id}\n  estado: ${p.estado}${p.ocupado ? ' (planejador pensando)' : ''} · modo: ${p.modoNome} · velocidade: ${p.velocidade || 'auto'} · acompanhamento: ${p.supervisao}${p.auto ? ' · automático' : ''}${p.run?.desespero ? ' · MODO DESESPERO' : ''}\n  planejador: ${p.planejador || (p.plannerEfetivo || [])[0] || '-'}\n  repo: ${p.repo}\n  painel: ${BASE}/#${p.id}`);
   for (const m of (p.mensagens || []).slice(-n)) console.log(`\n[${m.papel}${m.modelo ? ' ' + m.modelo : ''}] ${m.texto}`);
   if (p.plano) {
     console.log(`\nPlano: ${p.plano.resumo || ''}`);
     for (const t of p.plano.tarefas) {
       const s = p.run?.status?.[t.id];
-      console.log(`  - ${t.id} [${t.tipo}/${t.nivel}${t.confirmar ? '/confirmar' : ''}] ${t.titulo || ''} :: ${t.cadeiaEfetiva.join(' > ')}${t.depende.length ? ' :: depende ' + t.depende.join(',') : ''}${s ? ' :: ' + (TAREFA[s.state] || s.state) + (s.model ? ' (' + s.model + ')' : '') : ''}`);
+      console.log(`  - ${t.id} [${t.tipo}/${t.nivel}${t.esforco ? '/' + t.esforco : ''}${t.confirmar ? '/confirmar' : ''}] ${t.titulo || ''} :: ${t.cadeiaEfetiva.join(' > ')}${t.depende.length ? ' :: depende ' + t.depende.join(',') : ''}${s ? ' :: ' + (TAREFA[s.state] || s.state) + (s.model ? ' (' + s.model + ')' : '') : ''}`);
     }
   }
   for (const g of p.run?.gates || []) console.log(`\n>> CONFIRMAÇÃO PENDENTE [${g.gate}]: ${g.motivo}\n   node cli.mjs confirmar ${p.id} ${g.gate} sim|nao`);
@@ -306,7 +307,7 @@ try {
     case 'novo': {
       const pedido = o.arquivo ? fs.readFileSync(o.arquivo, 'utf8') : o._.join(' ');
       const custom = lerCustom(o.personalizado);
-      const p = await call('POST', '/api/projetos', { repo: o.repo, modo: custom || o.perfil ? 'personalizado' : o.modo || 'padrao', custom: o.perfil ? undefined : custom, perfil: o.perfil, supervisao: o.acompanhamento || 'automatico', auto: !!o.auto, titulo: o.titulo, pedido });
+      const p = await call('POST', '/api/projetos', { repo: o.repo, modo: custom || o.perfil ? 'personalizado' : o.modo || 'padrao', custom: o.perfil ? undefined : custom, perfil: o.perfil, velocidade: o.velocidade || 'auto', supervisao: o.acompanhamento || 'automatico', auto: !!o.auto, titulo: o.titulo, pedido });
       console.log('Projeto criado e enviado ao planejador.'); mostrar(p, 0); break;
     }
     case 'msg': await call('POST', `/api/projetos/${o._[0]}/mensagem`, { texto: o.arquivo ? fs.readFileSync(o.arquivo, 'utf8') : o._.slice(1).join(' ') }); console.log('Mensagem enviada.'); break;
@@ -339,6 +340,7 @@ try {
       break;
     }
     case 'acompanhamento': mostrar(await call('POST', `/api/projetos/${o._[0]}/ajustes`, { supervisao: o._[1] }), 0); break;
+    case 'velocidade': mostrar(await call('POST', `/api/projetos/${o._[0]}/ajustes`, { velocidade: o._[1] }), 0); break;
     case 'confirmar': mostrar(await call('POST', `/api/projetos/${o._[0]}/confirmar`, { gate: o._[1], decisao: o._[2] === 'nao' ? 'nao' : 'sim' }), 0); break;
     case 'aprovar': case 'retomar': case 'cancelar': mostrar(await call('POST', `/api/projetos/${o._[0]}/${cmd}`), 1); break;
     case 'arquivar': case 'desarquivar': { const p = await call('POST', `/api/projetos/${o._[0]}/arquivar`, { arquivar: cmd === 'arquivar' }); console.log(`Projeto ${p.id} ${p.arquivado ? 'arquivado' : 'desarquivado'}.`); break; }
@@ -393,7 +395,7 @@ try {
       for (const m of c.modelos) console.log(`  ${m.instalado ? ' ' : 'x'} ${m.id}${m.novo ? ' [novo]' : ''}${m.dica ? '  - ' + m.dica : ''}`);
       break;
     }
-    case 'status': for (const p of (await call('GET', '/api/projetos')).filter((x) => o.todos || !x.arquivado)) console.log(`${p.arquivado ? '[arquivado] ' : ''}${p.id}  ${p.estado}${p.ocupado ? '*' : ''}${p.gates ? ' (confirmação pendente)' : ''}  ${p.modoNome}  ${p.titulo}`); break;
+    case 'status': for (const p of (await call('GET', '/api/projetos')).filter((x) => o.todos || !x.arquivado)) console.log(`${p.arquivado ? '[arquivado] ' : ''}${p.id}  ${p.estado}${p.ocupado ? '*' : ''}${p.gates ? ' (confirmação pendente)' : ''}  ${p.modoNome} (${p.velocidade || 'auto'})  ${p.titulo}`); break;
     case 'esperar': {
       const lim = Date.now() + (Number(o._[1]) || 60) * 60000; let p;
       do {

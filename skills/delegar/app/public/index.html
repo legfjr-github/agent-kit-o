@@ -33,9 +33,11 @@
       <label>Repositório (pasta local) <input id="nRepo" placeholder="C:\Users\...\projeto" required></label>
       <div class="duas">
         <label>Modo <select id="nModo"></select></label>
+        <label>Velocidade <select id="nVel"></select></label>
         <label>Acompanhamento <select id="nSup"></select></label>
       </div>
       <p id="nModoDesc" class="hint"></p>
+      <p id="nVelDesc" class="hint"></p>
       <p id="nSupDesc" class="hint"></p>
       <div id="nBarra" class="barra-editor"></div>
       <details id="nModelosBox"><summary>Ver e mudar os modelos deste modo</summary><div id="nEditor"></div></details>
@@ -82,6 +84,7 @@
         </div>
         <div class="acoes">
           <label>Modo <select id="pModo"></select></label>
+          <label>Velocidade <select id="pVel"></select></label>
           <label>Acompanhamento <select id="pSup"></select></label>
           <button id="pModelos">Modelos</button>
           <button id="pAprovar" class="primary">Aprovar e iniciar</button>

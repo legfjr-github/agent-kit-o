@@ -47,11 +47,28 @@ test('escape já correto não é duplicado', () => {
   assert.equal(r.reparo, undefined);
 });
 
-test('defeito que o reparo local não resolve devolve erro e o texto bruto para o corretor', () => {
+test('aspas cruas dentro do texto são escapadas pelo reparo local', () => {
   const r = extractPlan(bloco('{"tarefas":[{"id":"w1","prompt":"ele disse "oi" e saiu"}]}'));
+  assert.equal(r.plan.tarefas[0].prompt, 'ele disse "oi" e saiu');
+  assert.equal(r.reparo, 'local');
+});
+
+test('defeito que o reparo local não resolve devolve erro e o texto bruto para o corretor', () => {
+  const r = extractPlan(bloco('{"tarefas":[{"id":"w1","prompt":"x"}'));
   assert.equal(r.plan, null);
   assert.match(r.error, /^JSON do plano inválido: /);
-  assert.ok(r.bruto.includes('"oi"'));
+  assert.ok(r.bruto.includes('"w1"'));
+});
+
+test('três crases dentro de um prompt não cortam o bloco', () => {
+  const plano = { tarefas: [{ id: 'w1', prompt: 'faça:\n```js\nconst a = 1;\n```\nfim' }, { id: 'w2', prompt: 'outra' }] };
+  const r = extractPlan('texto\n```json\n' + JSON.stringify(plano, null, 2) + '\n```\nfim');
+  assert.deepEqual(r.plan.tarefas.map((t) => t.id), ['w1', 'w2']);
+});
+
+test('barra invertida inválida em string vira barra literal', () => {
+  const r = extractPlan(bloco(String.raw`{"tarefas":[{"id":"w1","prompt":"pasta C:\Users\x"}]}`));
+  assert.equal(r.plan.tarefas[0].prompt, String.raw`pasta C:\Users\x`);
 });
 
 test('sem bloco json não é erro', () => {

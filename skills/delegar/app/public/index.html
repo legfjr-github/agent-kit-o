@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="delegar-token" content="__TOKEN__">
 <title>Delegar</title>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/fluxo.css">
 </head>
 <body>
 <header class="top">
@@ -13,6 +15,7 @@
   <span class="sub">planejar com um modelo, executar com vários agentes</span>
   <span id="provs" class="provs"></span>
   <button id="btnAtividade">Atividade <span id="ativBadge" class="contador hidden"></span></button>
+  <button id="btnCotas">Cotas</button>
   <button id="btnNovo" class="primary">Novo projeto</button>
 </header>
 <div class="layout">
@@ -34,7 +37,10 @@
       </div>
       <p id="nModoDesc" class="hint"></p>
       <p id="nSupDesc" class="hint"></p>
+      <div id="nBarra" class="barra-editor"></div>
       <details id="nModelosBox"><summary>Ver e mudar os modelos deste modo</summary><div id="nEditor"></div></details>
+      <div id="nFluxoRow" class="row"><button type="button" id="nFluxoBtn" aria-expanded="false" aria-controls="nFluxo">Ver fluxo</button></div>
+      <div id="nFluxo" class="fluxo hidden"></div>
       <label>Pedido <textarea id="nPedido" rows="7" placeholder="Descreva o trabalho: objetivo, escopo, o que já existe, o que publicar no fim."></textarea></label>
       <label class="check"><input type="checkbox" id="nAuto"> Confiar no orquestrador: planejar e iniciar sem aprovação</label>
       <div class="row"><button id="nCriar" class="primary">Criar e enviar ao planejador</button><button id="nCancelar">Cancelar</button></div>
@@ -44,6 +50,11 @@
     <section id="atividade" class="hidden">
       <div class="card"><h2>Atividade agora</h2><p class="hint">Quem está fazendo o quê em todos os projetos em andamento. Atualiza a cada 4 segundos.</p></div>
       <div id="ativLista"></div>
+    </section>
+
+    <section id="cotas" class="hidden">
+      <div class="card"><h2>Cotas</h2><p class="hint">Quanto resta em cada provedor. A leitura do Antigravity e do Claude leva de 20 a 40 s.</p><p id="cotasMsg" class="hint"></p></div>
+      <div id="cotasLista" class="cotas-lista"></div>
     </section>
 
     <section id="proj" class="hidden">
@@ -64,6 +75,10 @@
           <button id="pExcluir" class="perigo">Excluir</button>
         </div>
       </div>
+
+      <div id="pBarra" class="card"></div>
+
+      <div id="pCotasBox" class="card cotas-mini hidden"><h3>Cotas dos modelos deste projeto</h3><div id="pCotas"></div></div>
 
       <div id="pGates" class="hidden"></div>
 
@@ -92,6 +107,8 @@
 
         <div class="card plano">
           <h3>Plano e divisão</h3>
+          <div id="pFluxoRow" class="row"><button type="button" id="pFluxoBtn" aria-expanded="false" aria-controls="pFluxo">Ver fluxo</button></div>
+          <div id="pFluxo" class="fluxo hidden"></div>
           <p id="planoResumo" class="hint">Ainda sem plano.</p>
           <div id="divisao" class="divisao"></div>
           <div class="tabwrap"><table id="tarefas"><thead><tr><th>Tarefa</th><th>Tipo</th><th>Nível</th><th>Modelos</th><th>Depende</th><th>Estado</th></tr></thead><tbody></tbody></table></div>
@@ -103,6 +120,7 @@
     </section>
   </main>
 </div>
+<script src="/fluxo.js"></script>
 <script src="/painel.js"></script>
 </body>
 </html>

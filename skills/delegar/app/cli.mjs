@@ -2,16 +2,22 @@
 // CLI do Delegar. Uso:
 //   node cli.mjs iniciar                         sobe o painel (se não estiver no ar) e mostra o endereço
 //   node cli.mjs novo --repo <pasta> [--modo padrao|equilibrado|agressivo|desespero|personalizado]
-//        [--personalizado modo.json] [--acompanhamento automatico|acompanhado|passo] [--auto] [--titulo T] "pedido"
+//        [--personalizado modo.json | --perfil <nome>] [--acompanhamento automatico|acompanhado|passo] [--auto] [--titulo T] "pedido"
 //   node cli.mjs msg <id> "texto"                conversa com o planejador
 //   node cli.mjs plano <id>                      pede o plano final
 //   node cli.mjs ver <id>                        mostra conversa recente, plano e estado
 //   node cli.mjs modo <id> <modo> [--personalizado modo.json]   troca o modo antes de aprovar
+//   node cli.mjs modo <id> --perfil <nome>       aplica um perfil salvo ao projeto
+//   node cli.mjs perfis                          lista os perfis salvos (nome, primeiro modelo do planejador, data)
+//   node cli.mjs perfis salvar <nome> --personalizado modo.json [--sobrescrever]   salva um perfil (nome repetido dá erro sem --sobrescrever)
+//   node cli.mjs perfis renomear <de> <para> | perfis excluir <nome>
 //   node cli.mjs acompanhamento <id> <automatico|acompanhado|passo>   vale também durante a execução
 //   node cli.mjs aprovar <id> | retomar <id> | cancelar <id>
 //   node cli.mjs confirmar <id> <confirmação> [sim|nao]   responde a uma parada do modo acompanhado
 //   node cli.mjs atividade [id]                  quem está fazendo o quê agora e as últimas atualizações
-//   node cli.mjs modelos                         provedores instalados, modelos e a ordem do modo desespero
+//   node cli.mjs modelos [--atualizar]           provedores instalados, modelos (novos marcados com [novo]) e a ordem do modo desespero;
+//                                                --atualizar lê de novo as listas do agy e do opencode agora
+//   node cli.mjs cotas [--atualizar]             restante de cada cota (5 h e semanal) e quando renova; --atualizar lê de novo agora (20 a 40 s)
 //   node cli.mjs arquivar <id> | desarquivar <id>   tira o projeto da lista (ou devolve)
 //   node cli.mjs excluir <id>                    move a pasta do projeto para a lixeira (DATA/lixeira); não toca no repositório
 //   node cli.mjs status [--todos]                lista os projetos; --todos inclui os arquivados
@@ -61,6 +67,8 @@ function opts(argv) {
     const a = argv[i];
     if (a === '--auto') o.auto = true;
     else if (a === '--todos') o.todos = true;
+    else if (a === '--sobrescrever') o.sobrescrever = true;
+    else if (a === '--atualizar') o.atualizar = true;
     else if (a.startsWith('--')) o[a.slice(2)] = argv[++i];
     else o._.push(a);
   }
@@ -92,6 +100,46 @@ function mostrarAtividade(a) {
   if (a.commits.length) { console.log('   commits recentes:'); for (const c of a.commits.slice(0, 4)) console.log(`     ${c.hash} ${c.quando} ${c.assunto}`); }
 }
 
+const pad2 = (n) => String(n).padStart(2, '0');
+const hora = (iso) => { const x = new Date(iso); return isNaN(x) ? '-' : `${pad2(x.getHours())}:${pad2(x.getMinutes())}`; };
+function emQuanto(iso) {
+  const ms = new Date(iso) - Date.now();
+  if (isNaN(ms)) return '';
+  if (ms <= 0) return 'já renovou';
+  const min = Math.round(ms / 60000);
+  const h = Math.floor(min / 60), m = min % 60;
+  return h ? `em ${h} h ${m} min` : `em ${m} min`;
+}
+// Recebe o corpo de GET /api/cotas ou POST /api/cotas/atualizar e devolve o texto da tabela.
+export function formatarCotas(dados) {
+  const d = dados || {};
+  const out = [];
+  if (d.erro) out.push(`Erro: ${d.erro}`);
+  out.push(d.lidoEm ? `Última leitura: ${hora(d.lidoEm)}${d.idadeMin != null ? ` (há ${d.idadeMin} min)` : ''}` : 'Nenhuma leitura de cotas ainda.');
+  if (d.lendo) out.push('leitura em andamento; rode de novo em ~30 s');
+  const linhas = d.linhas || [];
+  if (!linhas.length) out.push('Nenhuma cota para mostrar.');
+  else {
+    const tabela = [['Cota', 'Restante', 'Renova', 'Lida em', 'Fonte/nota']];
+    for (const l of linhas) {
+      let restante = !l.instalado ? 'não instalado' : l.restante == null ? '-' : `${Math.round(l.restante * 100)}%`;
+      if (l.semCota) restante += ' SEM COTA';
+      const renova = l.renovaEm ? `${new Date(l.renovaEm).toLocaleString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} (${emQuanto(l.renovaEm)})` : '-';
+      tabela.push([
+        l.nome + (l.janela ? ` (${l.janela})` : ''),
+        restante,
+        renova,
+        l.lidoEm ? hora(l.lidoEm) : '-',
+        [l.fonte, l.nota].filter(Boolean).join(' · ') || '-',
+      ]);
+    }
+    const larg = tabela[0].map((_, i) => Math.max(...tabela.map((r) => r[i].length)));
+    for (const r of tabela) out.push(r.map((c, i) => c.padEnd(larg[i])).join('  ').trimEnd());
+  }
+  if (d.aviso) out.push(`Aviso: ${d.aviso}`);
+  return out.join('\n');
+}
+
 const [cmd, ...rest] = process.argv.slice(2);
 const o = opts(rest);
 try {
@@ -100,12 +148,38 @@ try {
     case 'novo': {
       const pedido = o.arquivo ? fs.readFileSync(o.arquivo, 'utf8') : o._.join(' ');
       const custom = lerCustom(o.personalizado);
-      const p = await call('POST', '/api/projetos', { repo: o.repo, modo: custom ? 'personalizado' : o.modo || 'padrao', custom, supervisao: o.acompanhamento || 'automatico', auto: !!o.auto, titulo: o.titulo, pedido });
+      const p = await call('POST', '/api/projetos', { repo: o.repo, modo: custom || o.perfil ? 'personalizado' : o.modo || 'padrao', custom: o.perfil ? undefined : custom, perfil: o.perfil, supervisao: o.acompanhamento || 'automatico', auto: !!o.auto, titulo: o.titulo, pedido });
       console.log('Projeto criado e enviado ao planejador.'); mostrar(p, 0); break;
     }
     case 'msg': await call('POST', `/api/projetos/${o._[0]}/mensagem`, { texto: o.arquivo ? fs.readFileSync(o.arquivo, 'utf8') : o._.slice(1).join(' ') }); console.log('Mensagem enviada.'); break;
     case 'plano': await call('POST', `/api/projetos/${o._[0]}/gerar-plano`); console.log('Plano final pedido ao planejador.'); break;
-    case 'modo': { const custom = lerCustom(o.personalizado); mostrar(await call('POST', `/api/projetos/${o._[0]}/ajustes`, { modo: custom ? 'personalizado' : o._[1], custom }), 0); break; }
+    case 'modo': {
+      if (o.perfil) { mostrar(await call('POST', `/api/projetos/${o._[0]}/ajustes`, { perfil: o.perfil }), 0); break; }
+      const custom = lerCustom(o.personalizado);
+      mostrar(await call('POST', `/api/projetos/${o._[0]}/ajustes`, { modo: custom ? 'personalizado' : o._[1], custom }), 0); break;
+    }
+    case 'perfis': {
+      const [sub, a, b] = o._;
+      if (!sub) {
+        const r = await call('GET', '/api/perfis');
+        if (r.aviso) console.log('Aviso: ' + r.aviso);
+        if (!r.perfis.length) console.log('Nenhum perfil salvo.');
+        for (const x of r.perfis) console.log(`  ${x.nome}  -  ${x.custom.planner[0]}  -  ${(x.atualizado || x.criado || '').slice(0, 10)}`);
+      } else if (sub === 'salvar') {
+        if (!a || !o.personalizado) throw new Error('uso: perfis salvar <nome> --personalizado modo.json [--sobrescrever]');
+        const r = await call('POST', '/api/perfis', { nome: a, custom: lerCustom(o.personalizado), sobrescrever: !!o.sobrescrever });
+        console.log(`Perfil "${r.perfil.nome}" salvo.`);
+      } else if (sub === 'renomear') {
+        if (!a || !b) throw new Error('uso: perfis renomear <de> <para>');
+        const r = await call('POST', '/api/perfis/renomear', { de: a, para: b });
+        console.log(`Perfil renomeado para "${r.perfil.nome}".`);
+      } else if (sub === 'excluir') {
+        if (!a) throw new Error('uso: perfis excluir <nome>');
+        await call('POST', '/api/perfis/excluir', { nome: a });
+        console.log(`Perfil "${a}" excluído.`);
+      } else throw new Error('subcomando de perfis desconhecido: ' + sub);
+      break;
+    }
     case 'acompanhamento': mostrar(await call('POST', `/api/projetos/${o._[0]}/ajustes`, { supervisao: o._[1] }), 0); break;
     case 'confirmar': mostrar(await call('POST', `/api/projetos/${o._[0]}/confirmar`, { gate: o._[1], decisao: o._[2] === 'nao' ? 'nao' : 'sim' }), 0); break;
     case 'aprovar': case 'retomar': case 'cancelar': mostrar(await call('POST', `/api/projetos/${o._[0]}/${cmd}`), 1); break;
@@ -117,11 +191,22 @@ try {
       if (!as.length) console.log('Nada em andamento.');
       as.forEach(mostrarAtividade); break;
     }
+    case 'cotas': {
+      if (o.atualizar) console.log('lendo as cotas (20 a 40 s)...');
+      const d = o.atualizar ? await call('POST', '/api/cotas/atualizar') : await call('GET', '/api/cotas');
+      console.log(formatarCotas(d)); break;
+    }
     case 'modelos': {
-      const c = await call('GET', '/api/modelos');
+      const c = o.atualizar ? await call('POST', '/api/modelos/atualizar') : await call('GET', '/api/modelos');
+      if (o.atualizar) {
+        const r = c.resultado || { novos: [], erros: {} };
+        const mostra = r.novos.slice(0, 10);
+        console.log(`Atualizado agora: ${r.novos.length} novo(s)${mostra.length ? ': ' + mostra.join(', ') + (r.novos.length > mostra.length ? ` e mais ${r.novos.length - mostra.length}` : '') : ''}`);
+        for (const [k, v] of Object.entries(r.erros || {})) console.log(`  erro em ${k}: ${v}`);
+      }
       console.log('Provedores: ' + Object.entries(c.provedores).map(([k, v]) => `${k} ${v ? 'instalado' : 'ausente'}`).join(' · '));
       console.log('Modo desespero (melhor para o pior): ' + c.desespero.join(' > '));
-      for (const m of c.modelos) console.log(`  ${m.instalado ? ' ' : 'x'} ${m.id}${m.dica ? '  - ' + m.dica : ''}`);
+      for (const m of c.modelos) console.log(`  ${m.instalado ? ' ' : 'x'} ${m.id}${m.novo ? ' [novo]' : ''}${m.dica ? '  - ' + m.dica : ''}`);
       break;
     }
     case 'status': for (const p of (await call('GET', '/api/projetos')).filter((x) => o.todos || !x.arquivado)) console.log(`${p.arquivado ? '[arquivado] ' : ''}${p.id}  ${p.estado}${p.ocupado ? '*' : ''}${p.gates ? ' (confirmação pendente)' : ''}  ${p.modoNome}  ${p.titulo}`); break;

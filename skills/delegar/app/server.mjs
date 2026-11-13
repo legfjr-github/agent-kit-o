@@ -7,7 +7,9 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { ENTRY_RE, QUOTA_RE, DESESPERO, adaptar, catalogo, detectar, atualizarListas } from './modelos.mjs';
+import { entradaValida, QUOTA_RE, DESESPERO, adaptar, catalogo, detectar, desesperoEfetivo, iniciarDescoberta } from './modelos.mjs';
+import { criarPerfis, validarNome } from './perfis.mjs';
+import { linhasDeCotas, cotasDoProjeto } from './cotas.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -19,6 +21,7 @@ process.on('unhandledRejection', (e) => console.error('promessa rejeitada sem tr
 for (const s of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP']) process.on(s, () => { console.log(`painel encerrado pelo sinal ${s}`); process.exit(0); });
 process.on('exit', (c) => console.log(`painel saiu (código ${c}, pid ${process.pid})`));
 const SCRIPTS = path.join(HERE, '..', 'scripts');
+const QUOTA_SCRIPT = process.env.DELEGAR_QUOTA_SCRIPT || path.join(SCRIPTS, 'quota.ps1');
 const PUBLIC = path.join(HERE, 'public');
 const PORT = Number(process.env.DELEGAR_PORT) || 8790;
 const HOME = os.homedir();
@@ -39,6 +42,7 @@ if (!fs.existsSync(TOKEN_FILE)) fs.writeFileSync(TOKEN_FILE, crypto.randomBytes(
 const TOKEN = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
 const PLANNER_FILE = path.join(HERE, 'planner.md');
 const CUSTOM_FILE = path.join(DATA, 'personalizado.json');
+const PERFIS_FILE = path.join(DATA, 'perfis.json');
 
 // ---------- modos ----------
 const GH = 'agy:gemini-3.8-flash-high', GM = 'agy:gemini-3.8-flash-medium', GL = 'agy:gemini-3.8-flash-low', ARGON = 'agy:gemini-4-argon-high';
@@ -105,8 +109,8 @@ function validarCustom(c) {
   for (const k of [...LISTAS_TOPO, ...NIVEIS]) {
     const lista = LISTAS_TOPO.includes(k) ? c[k] : c.tiers?.[k];
     if (!Array.isArray(lista) || !lista.length || lista.length > 8) { errs.push(`${k}: informe de 1 a 8 modelos`); continue; }
-    const ruins = lista.filter((e) => typeof e !== 'string' || !ENTRY_RE.test(e));
-    if (ruins.length) { errs.push(`${k}: modelo inválido (${ruins.slice(0, 2).map(String).join(', ').slice(0, 120)})`); continue; }
+    // A mensagem não repete o valor recebido: entrada de fora não volta na resposta.
+    if (lista.some((e) => !entradaValida(e))) { errs.push(`${k}: modelo inválido (use provedor:modelo[@esforço], com provedor claude, agy ou opencode)`); continue; }
     if (LISTAS_TOPO.includes(k)) out[k] = [...new Set(lista)]; else out.tiers[k] = [...new Set(lista)];
   }
   const mc = Number(c.maxConcurrent);
@@ -123,6 +127,8 @@ function modoComoCustom(k) {
 const cfgDe = (p) => (p.modo === 'personalizado' && p.custom ? p.custom : (temModo(p.modo) ? MODES[p.modo] : MODES.padrao));
 const nomeModo = (p) => cfgDe(p).nome;
 const supDe = (p) => (temSup(p.supervisao) ? p.supervisao : 'automatico');
+// Perfis personalizados com nome (DATA/perfis.json); cada perfil é revalidado por validarCustom ao ler e ao salvar.
+const perfis = criarPerfis({ arquivo: PERFIS_FILE, validar: validarCustom });
 
 // ---------- armazenamento ----------
 const idOk = (id) => typeof id === 'string' && /^[a-z0-9-]{6,80}$/.test(id);
@@ -183,10 +189,10 @@ function coletar(ch, entrada, limiteMs, onLine) {
 const LIMITE_PLANEJADOR = 40 * 60000;
 const instrucoes = () => fs.readFileSync(PLANNER_FILE, 'utf8');
 
-async function runClaude({ cwd, model, effort, prompt, resume }) {
+async function runClaude({ cwd, model, effort, prompt, resume, bare }) {
   const args = ['/d', '/c', 'claude', '-p', '--model', model, '--output-format', 'json',
-    '--dangerously-skip-permissions', '--disallowedTools', 'Edit,Write,NotebookEdit',
-    '--append-system-prompt-file', PLANNER_FILE];
+    '--dangerously-skip-permissions', '--disallowedTools', 'Edit,Write,NotebookEdit'];
+  if (!bare) args.push('--append-system-prompt-file', PLANNER_FILE);
   if (effort) args.push('--effort', effort);
   if (resume) args.push('--resume', resume);
   const r = await coletar(spawn('cmd.exe', args, { cwd, windowsHide: true }), prompt, LIMITE_PLANEJADOR);
@@ -196,12 +202,12 @@ async function runClaude({ cwd, model, effort, prompt, resume }) {
 }
 
 // opencode com o agente "plan" (não edita). O planner.md vai no começo do primeiro prompt.
-async function runOpencode({ cwd, model, effort, prompt, resume }) {
+async function runOpencode({ cwd, model, effort, prompt, resume, bare }) {
   const args = ['/d', '/c', 'opencode', 'run', '--pure', '--agent', 'plan', '--model', model, '--format', 'json', '--title', 'Delegar planejamento'];
   if (effort) args.push('--variant', effort);
   if (resume) args.push('--session', resume);
   const parts = []; let session = null; const erros = [];
-  const r = await coletar(spawn('cmd.exe', args, { cwd, windowsHide: true }), resume ? prompt : instrucoes() + '\n\n---\n\n' + prompt, LIMITE_PLANEJADOR, (l) => {
+  const r = await coletar(spawn('cmd.exe', args, { cwd, windowsHide: true }), resume || bare ? prompt : instrucoes() + '\n\n---\n\n' + prompt, LIMITE_PLANEJADOR, (l) => {
     try {
       const e = JSON.parse(l); session = e.sessionID || session;
       if (e.type === 'text' && e.part?.text) parts.push(e.part.text);
@@ -213,14 +219,14 @@ async function runOpencode({ cwd, model, effort, prompt, resume }) {
 }
 
 // agy com --dangerously-skip-permissions (o planejador continua proibido de editar pelo planner.md).
-async function runAgy({ cwd, model, effort, prompt }) {
+async function runAgy({ cwd, model, effort, prompt, bare }) {
   const exe = detectar().agy;
   const args = ['--model', model, '--input-format', 'stream-json', '--output-format', 'stream-json', '--dangerously-skip-permissions', '--disable-slash-commands', '--add-dir', cwd];
   if (fs.existsSync(VAULT)) args.push('--add-dir', VAULT);
   if (effort) args.push('--effort', effort);
   args.push('-p=');
   const buffer = []; let final = {};
-  const line = JSON.stringify({ event: 'user', message: { content: instrucoes() + '\n\n---\n\n' + prompt } }) + '\n';
+  const line = JSON.stringify({ event: 'user', message: { content: bare ? prompt : instrucoes() + '\n\n---\n\n' + prompt } }) + '\n';
   const r = await coletar(spawn(exe, args, { cwd, windowsHide: true }), line, LIMITE_PLANEJADOR, (l) => {
     try {
       const e = JSON.parse(l);
@@ -268,11 +274,69 @@ async function chamarPlanejador(p, texto) {
   return ultimo;
 }
 
+// Conserta sem IA os defeitos comuns do JSON escrito por modelo: quebra de linha ou tabulação crua dentro
+// de texto (o "Unterminated string"), vírgula antes de } ou ], aspas tipográficas fora de texto e lixo
+// antes do primeiro { ou depois do último }. Percorre caractere a caractere sabendo se está dentro de texto.
+function repararJson(bruto) {
+  let s = String(bruto).replace(/^\uFEFF/, '');
+  const i = s.indexOf('{'), j = s.lastIndexOf('}');
+  if (i >= 0 && j > i) s = s.slice(i, j + 1);
+  let out = '', dentro = false, esc = false, tipografica = false;
+  for (let k = 0; k < s.length; k++) {
+    let c = s[k];
+    if (dentro) {
+      if (esc) { esc = false; out += c; continue; }
+      if (c === '\\') { esc = true; out += c; continue; }
+      if (c === '"' || (tipografica && c === '”')) { dentro = false; out += '"'; continue; }
+      if (c === '\n') { out += '\\n'; continue; }
+      if (c === '\r') continue;
+      if (c === '\t') { out += '\\t'; continue; }
+      if (c < ' ') { out += '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'); continue; }
+      out += c; continue;
+    }
+    tipografica = c === '\u201c';
+    if (c === '\u201c' || c === '\u201d') c = '"';
+    if (c === '"') { dentro = true; out += c; continue; }
+    if (c === ',') { let n = k + 1; while (n < s.length && /\s/.test(s[n])) n++; if (s[n] === '}' || s[n] === ']') continue; }
+    out += c;
+  }
+  return out;
+}
+
 function extractPlan(text) {
-  const blocks = [...String(text).matchAll(/```json\s*([\s\S]*?)```/g)];
-  if (!blocks.length) return { plan: null };
-  try { return { plan: JSON.parse(blocks[blocks.length - 1][1]) }; }
-  catch (e) { return { plan: null, error: 'JSON do plano inválido: ' + e.message }; }
+  const t = String(text);
+  const blocks = [...t.matchAll(/```json\s*([\s\S]*?)```/g)];
+  let bruto = blocks.length ? blocks[blocks.length - 1][1] : null;
+  if (bruto == null) { const a = t.lastIndexOf('```json'); if (a < 0) return { plan: null }; bruto = t.slice(a + 7); } // bloco sem fecho
+  try { return { plan: JSON.parse(bruto) }; }
+  catch (e) {
+    try { return { plan: JSON.parse(repararJson(bruto)), reparo: 'local' }; }
+    catch { return { plan: null, bruto, error: 'JSON do plano inválido: ' + e.message }; }
+  }
+}
+
+// Corretor econômico de JSON: mesmo provedor do planejador, modelo leve, sem o planner.md. Só conserta o
+// formato; o conteúdo do plano não muda. Os outros provedores ficam de reserva (no máximo 2 tentativas).
+const CORRETORES = { claude: 'claude:haiku', agy: 'agy:gemini-3.8-flash-low', opencode: 'opencode:opencode/big-pickle' };
+async function corrigirJson(p, bruto, erro) {
+  const prov = p.planejador ? parseEntry(p.planejador).prov : null;
+  const ordem = [CORRETORES[prov], ...Object.values(CORRETORES)].filter((v, k, a) => v && a.indexOf(v) === k);
+  const prompt = 'Corrija SOMENTE o formato do JSON abaixo, que falhou no JSON.parse com o erro: ' + erro + '.\n' +
+    'Causas comuns: quebra de linha crua ou aspas duplas sem escape dentro de texto, vírgula sobrando, chave ou colchete faltando, texto cortado no fim.\n' +
+    'Não mude o conteúdo (tarefas, prompts, dependências, níveis): só o necessário para virar JSON válido. ' +
+    'Não leia nem altere arquivos. Responda apenas com um único bloco ```json``` contendo o JSON corrigido.\n\n```json\n' + bruto + '\n```';
+  for (const entry of adaptar(ordem).slice(0, 2)) {
+    const { prov: pv, model, effort } = parseEntry(entry);
+    const run = pv === 'claude' ? runClaude : pv === 'opencode' ? runOpencode : runAgy;
+    evento(p, { tipo: 'planejador', modelo: entry, texto: 'corrigindo o JSON do plano' });
+    try {
+      const r = await run({ cwd: p.repo, model, effort, prompt, bare: true });
+      if (!r.ok) continue;
+      const x = extractPlan(r.text);
+      if (x.plan) return { plan: x.plan, entry };
+    } catch (e) { console.error('corrigirJson', entry, e); }
+  }
+  return null;
 }
 
 function validatePlan(pl, isGit) {
@@ -290,7 +354,7 @@ function validatePlan(pl, isGit) {
     if (typeof t.prompt !== 'string' || t.prompt.length < 20) errs.push(`${t.id}: prompt vazio`);
     else if (t.prompt.length > 25000) errs.push(`${t.id}: prompt longo demais`);
     if (t.tipo === 'escritor' && !isGit) errs.push(`${t.id}: escritor exige repositório git`);
-    if (t.cadeia != null && (!Array.isArray(t.cadeia) || t.cadeia.some((e) => typeof e !== 'string' || !ENTRY_RE.test(e)))) errs.push(`${t.id}: cadeia inválida`);
+    if (t.cadeia != null && (!Array.isArray(t.cadeia) || t.cadeia.length > 8 || t.cadeia.some((e) => !entradaValida(e)))) errs.push(`${t.id}: cadeia inválida`);
     t.depende = Array.isArray(t.depende) ? t.depende : [];
     t.confirmar = t.confirmar === true;
     t.motivo = t.motivo == null ? '' : String(t.motivo).slice(0, 300);
@@ -323,8 +387,16 @@ async function plannerTurn(p, userText, { gerar = false } = {}) {
   }
   p.planejador = r.entry;
   p.mensagens.push({ papel: 'planejador', texto: r.text, quando: now(), modelo: r.entry });
-  const { plan, error } = extractPlan(r.text);
-  if (error) p.mensagens.push({ papel: 'sistema', texto: error, quando: now() });
+  let { plan, error, bruto, reparo } = extractPlan(r.text);
+  if (reparo) p.mensagens.push({ papel: 'sistema', texto: 'O JSON do plano veio com defeito de formato e foi consertado automaticamente (sem IA).', quando: now() });
+  if (error) {
+    p.mensagens.push({ papel: 'sistema', texto: error + ' Chamando um modelo econômico só para corrigir o formato…', quando: now() });
+    p.ocupado = true; save(p);
+    const c = await corrigirJson(p, bruto, error.replace(/^JSON do plano inválido: /, ''));
+    p = load(p.id); p.ocupado = false;
+    if (c) { plan = c.plan; p.mensagens.push({ papel: 'sistema', texto: `JSON do plano corrigido automaticamente por ${c.entry}; o conteúdo é o do planejador.`, quando: now() }); }
+    else p.mensagens.push({ papel: 'sistema', texto: 'Não foi possível corrigir o JSON automaticamente. Use "Gerar plano" ou mande uma mensagem ao planejador.', quando: now() });
+  }
   if (plan) {
     const errs = validatePlan(plan, isGitRepo(p.repo));
     if (errs.length) {
@@ -377,7 +449,7 @@ function buildPlanFile(p) {
   const plan = {
     name: p.id, repo: p.repo, worktreeRoot: p.repo + '-wt', logDir: path.join(dir, 'logs'),
     chain: comReserva(adaptar(vol0)), fixChain: comReserva(adaptar(m.fix)), coordinatorChain: comReserva(adaptar(m.coord)),
-    desperateChain: adaptar(DESESPERO, []), supervision: supDe(p),
+    desperateChain: adaptar(desesperoEfetivo(), []), supervision: supDe(p),
     maxConcurrent: Math.max(1, Math.min(Number(p.plano.maxConcurrent) || m.maxConcurrent, m.maxConcurrent)),
     maxRecoveries: 2, verify: (p.plano.verify || []).filter((v) => typeof v === 'string' && v.trim()), tasks,
   };
@@ -676,10 +748,11 @@ function send(res, code, body, type = 'application/json; charset=utf-8') {
   });
   res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
 }
+const publico = (msg) => Object.assign(new Error(msg), { publico: true });
 const readBody = (req) => new Promise((resolve, reject) => {
   let n = 0; const chunks = [];
-  req.on('data', (c) => { n += c.length; if (n > 1e6) { reject(new Error('corpo grande demais')); req.destroy(); } else chunks.push(c); });
-  req.on('end', () => { try { const j = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}; resolve(j && typeof j === 'object' ? j : {}); } catch { reject(new Error('JSON inválido')); } });
+  req.on('data', (c) => { n += c.length; if (n > 1e6) { reject(publico('corpo grande demais')); req.destroy(); } else chunks.push(c); });
+  req.on('end', () => { try { const j = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}; resolve(j && typeof j === 'object' ? j : {}); } catch { reject(publico('JSON inválido')); } });
 });
 const safeEq = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); };
 
@@ -695,7 +768,7 @@ function desarquivarSePreciso(p) {
   evento(p, { tipo: 'projeto', texto: 'desarquivado' });
 }
 function publicView(p, full) {
-  const v = { id: p.id, titulo: p.titulo, modo: p.modo, modoNome: nomeModo(p), supervisao: supDe(p), estado: p.estado, auto: p.auto, repo: p.repo, criado: p.criado, inicio: p.inicio, fim: p.fim, ocupado: !!p.ocupado, arquivado: !!p.arquivado };
+  const v = { id: p.id, titulo: p.titulo, modo: p.modo, modoNome: nomeModo(p), supervisao: supDe(p), estado: p.estado, auto: p.auto, repo: p.repo, criado: p.criado, inicio: p.inicio, fim: p.fim, ocupado: !!p.ocupado, arquivado: !!p.arquivado, perfil: p.perfil || null };
   if (!full) { v.gates = p.estado === 'executando' ? gatesPendentes(p).length : 0; return v; }
   v.pedido = p.pedido; v.mensagens = p.mensagens; v.planejador = p.planejador || null;
   v.config = modoPublico(p); v.plannerEfetivo = adaptar(cfgDe(p).planner);
@@ -710,6 +783,20 @@ function publicView(p, full) {
 
 // Aplica o modo pedido ao projeto. "personalizado" sem configuração copia o modo atual. Devolve o erro ou null.
 function aplicarModo(p, b) {
+  if (b.perfil != null) {
+    if (typeof b.perfil !== 'string') return 'perfil inválido';
+    const vn = validarNome(b.perfil);
+    if (!vn.ok) return vn.erro;
+    const salvo = perfis.obter(vn.nome);
+    if (!salvo) return 'perfil não encontrado';
+    const { errs, custom } = validarCustom(salvo.custom);
+    if (errs.length) return errs.join('; ');
+    p.modo = 'personalizado';
+    p.custom = { ...custom, nome: 'Perfil: ' + salvo.nome, descricao: 'Perfil salvo ' + salvo.nome + '.' };
+    p.perfil = salvo.nome;
+    return null;
+  }
+  delete p.perfil; // qualquer outro modo desfaz o vínculo com o perfil
   if (b.modo === 'personalizado') {
     const { errs, custom } = validarCustom(b.custom || p.custom || modoComoCustom(p.modo));
     if (errs.length) return errs.join('; ');
@@ -721,6 +808,137 @@ function aplicarModo(p, b) {
   return 'modo desconhecido';
 }
 
+// Rotas de perfis. Nomes vão só no corpo, nunca no caminho. Já chega depois da checagem do token.
+async function rotaPerfis(req, res, parts) {
+  const sub = parts[2];
+  if (parts.length > 3 || (sub && !['renomear', 'excluir'].includes(sub))) return send(res, 404, { erro: 'não encontrado' });
+  if (!sub) {
+    if (req.method === 'GET') return send(res, 200, { perfis: perfis.listar(), aviso: perfis.aviso() });
+    if (req.method !== 'POST') return send(res, 405, { erro: 'método não permitido' });
+  } else if (req.method !== 'POST') return send(res, 405, { erro: 'método não permitido' });
+  const b = await readBody(req);
+  let r;
+  try {
+    if (!sub) r = perfis.salvar(b.nome, b.custom, { sobrescrever: b.sobrescrever === true });
+    else if (sub === 'renomear') r = perfis.renomear(b.de, b.para);
+    else r = perfis.excluir(b.nome);
+  } catch (e) {
+    console.error('falha ao gravar perfis:', e);
+    return send(res, 500, { erro: 'não foi possível gravar os perfis' });
+  }
+  if (!r.ok) return send(res, r.status || 400, { erro: r.erro });
+  if (!sub) return send(res, r.criado ? 201 : 200, { perfil: r.perfil });
+  if (sub === 'renomear') return send(res, 200, { perfil: r.perfil });
+  return send(res, 200, { ok: true });
+}
+
+// ---------- cotas ----------
+// O quota.ps1 grava DATA/state/quota-last.json. Só uma leitura roda por vez; quem chega durante ela espera a mesma.
+// Nada do cliente entra nos argumentos e nenhuma saída do script volta para o cliente: o detalhe fica só no console.
+const COTAS_FRESCO_MIN = 10;
+const COTAS_FORCADA_INTERVALO_MS = 30000;
+const COTAS_RETENTATIVA_MS = 60000;
+let leituraAtual = null, leituraForcada = false, proximaForcada = null;
+let erroLeitura = null, fimUltimaLeitura = 0, fimUltimaForcada = 0;
+
+function lerCache() {
+  const c = lerJson(path.join(DATA, 'state', 'quota-last.json'));
+  return c && typeof c === 'object' && !Array.isArray(c) ? c : null;
+}
+function idadeCacheMin(c) {
+  const t = c && typeof c.time === 'string' ? new Date(c.time).getTime() : NaN;
+  return Number.isNaN(t) ? null : Math.max(0, (Date.now() - t) / 60000);
+}
+function iniciarLeituraCotas(forcar) {
+  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', QUOTA_SCRIPT, '-MaxAgeMinutes', String(forcar ? 0 : COTAS_FRESCO_MIN)];
+  if (process.env.DELEGAR_PROVEDORES === 'nenhum') args.push('-SkipClaudeProbe', '-SkipAgy');
+  leituraForcada = forcar;
+  const p = new Promise((resolve) => {
+    try {
+      execFile('powershell.exe', args, { windowsHide: true, timeout: 120000, maxBuffer: 2 * 1024 * 1024, env: { ...process.env, DELEGAR_DATA: DATA } }, (e, out, err) => {
+        if (e) {
+          console.error('leitura das cotas falhou:', e.message, String(err || '').slice(0, 500));
+          erroLeitura = e.killed || e.signal ? 'tempo esgotado' : 'falha ao ler as cotas';
+        } else if (!lerCache()) erroLeitura = 'falha ao ler as cotas';
+        else erroLeitura = null;
+        fimUltimaLeitura = Date.now();
+        if (forcar) fimUltimaForcada = fimUltimaLeitura;
+        resolve();
+      });
+    } catch (e) {
+      console.error('leitura das cotas não iniciou:', e.message);
+      erroLeitura = 'falha ao ler as cotas'; fimUltimaLeitura = Date.now();
+      if (forcar) fimUltimaForcada = fimUltimaLeitura;
+      resolve();
+    }
+  });
+  leituraAtual = p;
+  p.then(() => { if (leituraAtual === p) leituraAtual = null; });
+  return p;
+}
+// Nunca rejeita. Pedido forçado durante uma leitura comum espera ela acabar e roda uma só leitura forçada, compartilhada.
+function lerCotas(forcar) {
+  if (leituraAtual && (leituraForcada || !forcar)) return leituraAtual;
+  if (leituraAtual) {
+    if (!proximaForcada) proximaForcada = leituraAtual.then(() => { proximaForcada = null; return iniciarLeituraCotas(true); });
+    return proximaForcada;
+  }
+  return iniciarLeituraCotas(forcar);
+}
+const lendoCotas = () => !!(leituraAtual || proximaForcada);
+// Cache velho ou ausente dispara leitura em segundo plano; depois de uma falha, espera um tempo antes de tentar de novo.
+function atualizarCotasSePreciso() {
+  const c = lerCache();
+  const idade = idadeCacheMin(c);
+  const velho = idade === null || idade > COTAS_FRESCO_MIN;
+  if (velho && !lendoCotas() && !(erroLeitura && Date.now() - fimUltimaLeitura < COTAS_RETENTATIVA_MS)) lerCotas(false);
+}
+function respostaCotas(aviso = null) {
+  const c = lerCache();
+  const idade = idadeCacheMin(c);
+  const prov = Object.fromEntries(Object.entries(detectar()).map(([k, v]) => [k, !!v])); // só se existe, nunca o caminho da CLI
+  const t = c && typeof c.time === 'string' ? new Date(c.time) : null;
+  return {
+    lidoEm: t && !Number.isNaN(t.getTime()) ? t.toISOString() : null,
+    idadeMin: idade === null ? null : Math.round(idade),
+    lendo: lendoCotas(), erro: erroLeitura, aviso,
+    linhas: linhasDeCotas(c, prov), provedores: prov,
+  };
+}
+async function rotaCotas(req, res, parts) {
+  const sub = parts[2];
+  if (parts.length > 3 || (sub && sub !== 'atualizar')) return send(res, 404, { erro: 'não encontrado' });
+  if (req.method !== (sub ? 'POST' : 'GET')) return send(res, 405, { erro: 'método não permitido' });
+  if (!sub) { atualizarCotasSePreciso(); return send(res, 200, respostaCotas()); }
+  const forcadaEmCurso = (leituraAtual && leituraForcada) || proximaForcada;
+  if (!forcadaEmCurso && Date.now() - fimUltimaForcada < COTAS_FORCADA_INTERVALO_MS) return send(res, 200, respostaCotas('leitura recente; aguarde'));
+  await lerCotas(true);
+  return send(res, 200, respostaCotas());
+}
+// Cotas dos grupos de modelos que o projeto usa (planejador, correção, coordenação e cadeias das tarefas) e dos que rodam agora.
+function cotasDoProjetoView(p) {
+  const m = cfgDe(p);
+  const entradas = [...(m.planner || []), ...(m.fix || []), ...(m.coord || [])];
+  let vol = 0;
+  for (const t of p.plano?.tarefas || []) entradas.push(...chainFor(p, t, t.nivel === 'volume' ? vol++ : 0));
+  const atuais = [];
+  const run = readRun(p);
+  for (const [id, v] of Object.entries(run.status)) {
+    if (!v || v.state !== 'running') continue;
+    const agora = agoraNaTarefa(p, v.note === 'fixing' ? id + '-fix' : id);
+    const modelo = agora?.modelo || v.model || null;
+    if (modelo) atuais.push({ tarefa: id, modelo });
+  }
+  atualizarCotasSePreciso();
+  const c = lerCache();
+  const t = c && typeof c.time === 'string' ? new Date(c.time) : null;
+  return {
+    lidoEm: t && !Number.isNaN(t.getTime()) ? t.toISOString() : null,
+    lendo: lendoCotas(), erro: erroLeitura,
+    linhas: cotasDoProjeto(linhasDeCotas(c, detectar()), entradas, atuais),
+  };
+}
+
 async function api(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean); // api, recurso, id, acao
   if (parts[1] === 'saude') return send(res, 200, { ok: true });
@@ -729,7 +947,15 @@ async function api(req, res, url) {
     const modos = Object.fromEntries(Object.entries(MODES).map(([k, m]) => [k, { nome: m.nome, descricao: m.descricao, tiers: m.tiers, planner: m.planner, fix: m.fix, coord: m.coord, maxConcurrent: m.maxConcurrent, plannerEfetivo: adaptar(m.planner) }]));
     return send(res, 200, { modos, supervisao: SUPERVISAO, ultimoPersonalizado: lerJson(CUSTOM_FILE), padraoPersonalizado: modoComoCustom('padrao') });
   }
-  if (req.method === 'GET' && parts[1] === 'modelos') return send(res, 200, catalogo());
+  if (parts[1] === 'perfis') return await rotaPerfis(req, res, parts);
+  if (parts[1] === 'cotas') return await rotaCotas(req, res, parts);
+  if (parts[1] === 'modelos' && parts[2] === 'atualizar') {
+    if (parts.length > 3) return send(res, 404, { erro: 'não encontrado' });
+    if (req.method !== 'POST') return send(res, 405, { erro: 'método não permitido' });
+    const resultado = await iniciarDescoberta({ dataDir: DATA });
+    return send(res, 200, { ...catalogo(), resultado });
+  }
+  if (req.method === 'GET' && parts[1] === 'modelos' && !parts[2]) return send(res, 200, catalogo());
   if (req.method === 'GET' && parts[1] === 'atividade') {
     const ativos = listAll().filter((p) => p.estado === 'executando' || p.ocupado);
     return send(res, 200, await Promise.all(ativos.map(atividade)));
@@ -747,7 +973,7 @@ async function api(req, res, url) {
     const p = { id: `${stamp}-${slug(titulo)}-${crypto.randomBytes(2).toString('hex')}`, titulo, tituloFixo: !!b.titulo, pedido, repo, modo: 'padrao', auto: !!b.auto,
       supervisao: temSup(b.supervisao) ? b.supervisao : 'automatico',
       criado: now(), estado: 'planejando', mensagens: [{ papel: 'usuario', texto: pedido, quando: now() }], sessao: null, plano: null };
-    const erro = aplicarModo(p, { modo: b.modo || 'padrao', custom: b.custom });
+    const erro = aplicarModo(p, { modo: b.modo || 'padrao', custom: b.custom, perfil: b.perfil });
     if (erro) return send(res, 400, { erro });
     if (!adaptar(cfgDe(p).planner).length) return send(res, 400, { erro: 'nenhuma CLI de IA (claude, agy ou opencode) encontrada neste PC' });
     save(p);
@@ -758,6 +984,11 @@ async function api(req, res, url) {
   if (!p) return send(res, 404, { erro: 'projeto não encontrado' });
   if (req.method === 'GET' && !parts[3]) return send(res, 200, publicView(p, true));
   if (req.method === 'GET' && parts[3] === 'atividade') return send(res, 200, await atividade(p));
+  if (parts[3] === 'cotas') {
+    if (parts.length > 4) return send(res, 404, { erro: 'não encontrado' });
+    if (req.method !== 'GET') return send(res, 405, { erro: 'método não permitido' });
+    return send(res, 200, cotasDoProjetoView(p));
+  }
   if (req.method !== 'POST') return send(res, 405, { erro: 'método não permitido' });
   const b = await readBody(req);
   const busy = () => send(res, 409, { erro: 'o planejador ainda está respondendo' });
@@ -782,13 +1013,13 @@ async function api(req, res, url) {
       return send(res, 202, { ok: true });
     }
     case 'ajustes': {
-      if (running && (b.modo != null || b.niveis != null || typeof b.auto === 'boolean')) return send(res, 409, { erro: 'execução em andamento' });
+      if (running && (b.modo != null || b.perfil != null || b.niveis != null || typeof b.auto === 'boolean')) return send(res, 409, { erro: 'execução em andamento' });
       if (b.supervisao != null) {
         if (!temSup(b.supervisao)) return send(res, 400, { erro: 'acompanhamento desconhecido' });
         p.supervisao = b.supervisao; // vale também durante a execução, nas próximas confirmações
         if (running) gravarSupervisao(p);
       }
-      if (b.modo != null) { const erro = aplicarModo(p, b); if (erro) return send(res, 400, { erro }); }
+      if (b.modo != null || b.perfil != null) { const erro = aplicarModo(p, b); if (erro) return send(res, 400, { erro }); }
       if (typeof b.auto === 'boolean') p.auto = b.auto;
       if (p.plano && b.niveis && typeof b.niveis === 'object') for (const t of p.plano.tarefas) if (NIVEIS.includes(b.niveis[t.id])) t.nivel = b.niveis[t.id];
       save(p); report(p);
@@ -841,13 +1072,14 @@ async function api(req, res, url) {
   return send(res, 404, { erro: 'ação desconhecida' });
 }
 
-const STATIC = { '/': 'index.html', '/painel.js': 'painel.js', '/style.css': 'style.css' };
+const STATIC = { '/': 'index.html', '/painel.js': 'painel.js', '/style.css': 'style.css', '/fluxo.js': 'fluxo.js', '/fluxo.css': 'fluxo.css' };
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
 const server = http.createServer(async (req, res) => {
   const host = String(req.headers.host || '');
   if (host !== `127.0.0.1:${PORT}` && host !== `localhost:${PORT}`) return send(res, 421, { erro: 'host não permitido' });
-  const url = new URL(req.url, `http://${host}`);
   try {
+    let url;
+    try { url = new URL(req.url, `http://${host}`); } catch { return send(res, 400, { erro: 'endereço inválido' }); } // ex.: "//" não é URL e não pode deixar a requisição pendurada
     if (url.pathname.startsWith('/api/')) return await api(req, res, url);
     const f = STATIC[url.pathname];
     if (req.method !== 'GET' || !f) return send(res, 404, 'não encontrado', 'text/plain; charset=utf-8');
@@ -855,14 +1087,20 @@ const server = http.createServer(async (req, res) => {
     if (f === 'index.html') body = body.replace('__TOKEN__', TOKEN);
     return send(res, 200, body, TYPES[path.extname(f)]);
   } catch (e) {
+    // Só mensagens nossas (corpo grande, JSON inválido) vão para o cliente; erro inesperado fica no log, sem caminho nem detalhe.
+    if (e && e.publico) return send(res, 400, { erro: e.message });
     console.error(e);
-    return send(res, 400, { erro: e.message || 'erro' });
+    return send(res, 500, { erro: 'erro interno do painel' });
   }
 });
 
 // Projetos que ficaram "planejando" quando o servidor caiu
 for (const p of listAll()) if (p.ocupado) { p.ocupado = false; p.mensagens.push({ papel: 'sistema', texto: 'O servidor reiniciou durante a resposta do planejador. Envie a mensagem de novo.', quando: now() }); save(p); }
-detectar(); atualizarListas();
+detectar();
 setInterval(poll, 10000);
 server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `porta ${PORT} já em uso; outro painel está no ar` : e); process.exit(1); });
-server.listen(PORT, '127.0.0.1', () => console.log(`Delegar em http://127.0.0.1:${PORT} (pid ${process.pid}) · provedores: ${Object.entries(detectar()).filter(([, v]) => v).map(([k]) => k).join(', ') || 'nenhum'}`));
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`Delegar em http://127.0.0.1:${PORT} (pid ${process.pid}) · provedores: ${Object.entries(detectar()).filter(([, v]) => v).map(([k]) => k).join(', ') || 'nenhum'}`);
+  // Descoberta de modelos em segundo plano: o painel já responde enquanto ela roda.
+  iniciarDescoberta({ dataDir: DATA }).then((r) => console.log(`descoberta de modelos: ${r.novos.length} novos; erros: ${Object.keys(r.erros).length ? Object.entries(r.erros).map(([k, v]) => k + ': ' + v).join('; ') : 'nenhum'}`)).catch((e) => console.error('descoberta de modelos falhou:', e));
+});

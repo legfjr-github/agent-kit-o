@@ -65,7 +65,8 @@ function ResumoAcoes($outFile, $max = 40) {
 function ClaudeQuota {
   try {
     & (Join-Path $PSScriptRoot 'quota.ps1') -MaxAgeMinutes ([Math]::Max(1, $QuotaCheckMinutes - 1)) 2>$null | Out-Null
-    $q = Get-Content (Join-Path $env:USERPROFILE '.delegar\state\quota-last.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $dBase = if ($env:DELEGAR_DATA) { $env:DELEGAR_DATA } else { Join-Path $env:USERPROFILE '.delegar' }
+    $q = Get-Content (Join-Path (Join-Path $dBase 'state') 'quota-last.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     return $q.claude
   } catch { return $null }
 }
@@ -179,7 +180,8 @@ foreach ($entry in $Chain) {
   }
 
   if ($quota) {
-    $ledgerDir = Join-Path $env:USERPROFILE '.delegar\state'
+    $dBase = if ($env:DELEGAR_DATA) { $env:DELEGAR_DATA } else { Join-Path $env:USERPROFILE '.delegar' }
+    $ledgerDir = Join-Path $dBase 'state'
     New-Item -ItemType Directory -Force $ledgerDir | Out-Null
     $evt = [pscustomobject]@{ time = (Get-Date).ToString('s'); worker = $entry; logDir = $LogDir } | ConvertTo-Json -Compress
     Add-Content (Join-Path $ledgerDir 'quota-ledger.jsonl') $evt -Encoding UTF8

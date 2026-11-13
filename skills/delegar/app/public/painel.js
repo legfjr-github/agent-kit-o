@@ -21,6 +21,7 @@ let MODES = {}, SUP = {}, CAT = { modelos: [], provedores: {} }, ULTIMO = null, 
 let atual = null, ultimoMsgs = -1, timer = null, vista = 'vazio', projAtual = null;
 const promptsAbertos = new Set();   // prompts de tarefa abertos: a tabela é refeita a cada 4 s e não pode fechá-los
 let novoCfg = null, projCfg = null;
+let PERFIS = null, PERFIS_AVISO = null, novoPerfil = null, msgModelos = '';   // PERFIS = null: a API de perfis não respondeu, a interface de perfis some
 
 const flat = (t) => (Array.isArray(t?.[0]) ? t[0] : t || []);
 const copia = (o) => JSON.parse(JSON.stringify(o));
@@ -39,7 +40,7 @@ function fillModes(sel) {
   sel.replaceChildren(...Object.entries(MODES).map(([k, m]) => el('option', { value: k, text: m.nome })), el('option', { value: 'personalizado', text: 'Personalizado' }));
 }
 function fillSup(sel) { sel.replaceChildren(...Object.keys(SUP).map((k) => el('option', { value: k, text: SUP[k].split(':')[0] }))); }
-function show(id) { vista = id; for (const s of ['vazio', 'novo', 'proj', 'atividade']) $(s).classList.toggle('hidden', s !== id); }
+function show(id) { vista = id; for (const s of ['vazio', 'novo', 'proj', 'atividade', 'cotas']) $(s).classList.toggle('hidden', s !== id); }
 
 // ---------- editor de modo ----------
 function editor(box, cfg, { editavel = true, onChange } = {}) {
@@ -47,7 +48,7 @@ function editor(box, cfg, { editavel = true, onChange } = {}) {
     const s = el('select', { class: 'modelo' });
     for (const prov of ['claude', 'agy', 'opencode']) {
       const g = el('optgroup', { label: prov + (CAT.provedores[prov] ? '' : ' (não instalado neste PC)') });
-      for (const m of CAT.modelos.filter((x) => x.provedor === prov)) g.append(el('option', { value: m.id, text: m.id.slice(prov.length + 1) + (m.desespero ? ` · gratuito nº ${m.desespero}` : '') }));
+      for (const m of CAT.modelos.filter((x) => x.provedor === prov)) g.append(el('option', { value: m.id, text: m.id.slice(prov.length + 1) + (m.desespero ? ` · gratuito nº ${m.desespero}` : '') + (m.novo ? ' · novo' : '') }));
       s.append(g);
     }
     return s;
@@ -58,7 +59,8 @@ function editor(box, cfg, { editavel = true, onChange } = {}) {
     for (const [k, rot] of PAPEIS) {
       const arr = lista(cfg, k);
       const chips = el('div', { class: 'chips' }, ...arr.map((id, i) => {
-        const c = el('span', { class: 'chip', title: (CAT.modelos.find((m) => m.id === id.split('@')[0])?.dica) || '' }, el('span', { text: `${i + 1}. ${nomeModelo(id)}` }));
+        const cm = CAT.modelos.find((m) => m.id === id.split('@')[0]);
+        const c = el('span', { class: 'chip', title: cm?.dica || '' }, el('span', { text: `${i + 1}. ${nomeModelo(id)}` }), cm?.novo ? el('span', { class: 'marca-novo', text: 'novo' }) : null);
         if (editavel) {
           if (i > 0) { const up = el('button', { class: 'mini', text: '↑', title: 'subir' }); up.onclick = () => { [arr[i - 1], arr[i]] = [arr[i], arr[i - 1]]; mudou(); }; c.append(up); }
           const rm = el('button', { class: 'mini', text: '×', title: 'remover' }); rm.onclick = () => { arr.splice(i, 1); mudou(); }; c.append(rm);
@@ -85,6 +87,112 @@ function editor(box, cfg, { editavel = true, onChange } = {}) {
     }
   };
   render();
+}
+
+// ---------- perfis, atualização de modelos e fluxo ----------
+const cfgDeCustom = (c) => ({ base: c.base || null, planner: [...c.planner], fix: [...c.fix], coord: [...c.coord], maxConcurrent: c.maxConcurrent || 2,
+  tiers: { pesado: [...flat(c.tiers.pesado)], volume: [...flat(c.tiers.volume)], leve: [...flat(c.tiers.leve)] } });
+const nomesErros = (e) => (Array.isArray(e) ? e.map(String) : Object.entries(e || {}).map(([k, v]) => k + ': ' + v));
+async function carregarPerfis() {
+  try { const r = await call('GET', '/api/perfis'); PERFIS = r.perfis; PERFIS_AVISO = r.aviso || null; }
+  catch { PERFIS = null; PERFIS_AVISO = null; }
+}
+// Barra de perfis salvos e de atualização de modelos. o: { selId, valor(), desabilitado(), cfg(), aoEscolher(nome), aoSalvar(nome) }
+function montarBarra(box, o) {
+  const itens = [];
+  if (PERFIS) {
+    const sel = el('select', { class: 'perfil-sel', id: o.selId, title: 'Perfis salvos' }, el('option', { value: '', text: 'Nenhum perfil aplicado' }), ...PERFIS.map((p) => el('option', { value: p.nome, text: p.nome })));
+    sel.value = o.valor() || ''; sel.disabled = !!o.desabilitado();
+    sel.onchange = () => o.aoEscolher(sel.value || null);
+    const salvar = el('button', { type: 'button', text: 'Salvar como perfil', title: 'Guarda os modelos atuais com um nome' });
+    salvar.onclick = async () => {
+      const nome = prompt('Nome do perfil (letras, números, espaço e . _ ( ) + -):', sel.value || ''); if (!nome || !nome.trim()) return;
+      const grava = (sobrescrever) => call('POST', '/api/perfis', { nome: nome.trim(), custom: o.cfg(), sobrescrever });
+      try {
+        let r;
+        try { r = await grava(false); }
+        catch (e) { if (/já existe/.test(e.message) && confirm(`Já existe o perfil "${nome.trim()}". Substituir pelos modelos atuais?`)) r = await grava(true); else throw e; }
+        await carregarPerfis(); if (o.aoSalvar) o.aoSalvar(r.perfil.nome); montarBarras();
+      } catch (e) { alert(e.message); }
+    };
+    const renomear = el('button', { type: 'button', text: 'Renomear' });
+    renomear.onclick = async () => {
+      if (!sel.value) return alert('Escolha um perfil na lista para renomear.');
+      const para = prompt('Novo nome do perfil:', sel.value); if (!para || !para.trim() || para.trim() === sel.value) return;
+      try { const r = await call('POST', '/api/perfis/renomear', { de: sel.value, para: para.trim() }); if (novoPerfil === sel.value) novoPerfil = r.perfil.nome; await carregarPerfis(); montarBarras(); if (atual) refresh(); } catch (e) { alert(e.message); }
+    };
+    const excluir = el('button', { type: 'button', class: 'perigo', text: 'Excluir perfil' });
+    excluir.onclick = async () => {
+      if (!sel.value) return alert('Escolha um perfil na lista para excluir.');
+      if (!confirm(`Excluir o perfil "${sel.value}"? Projetos que já o usam continuam com os modelos que têm.`)) return;
+      try { await call('POST', '/api/perfis/excluir', { nome: sel.value }); if (novoPerfil === sel.value) novoPerfil = null; await carregarPerfis(); montarBarras(); } catch (e) { alert(e.message); }
+    };
+    itens.push(el('div', { class: 'perfilbar' }, el('strong', { text: 'Perfil' }), sel, el('div', { class: 'btns' }, salvar, renomear, excluir)));
+    if (PERFIS_AVISO) itens.push(el('p', { class: 'hint', text: PERFIS_AVISO }));
+  }
+  const msg = el('span', { class: 'hint barra-msg', text: msgModelos });
+  const atualizar = el('button', { type: 'button', text: 'Atualizar modelos', title: 'Consulta as CLIs instaladas (agy e opencode) e marca o que é novo' });
+  atualizar.onclick = async () => {
+    atualizar.disabled = true; msg.textContent = 'Consultando as CLIs…';
+    try {
+      const r = await call('POST', '/api/modelos/atualizar');
+      const { resultado, ...cat } = r; CAT = cat;
+      const erros = nomesErros(resultado?.erros);
+      msgModelos = `${(resultado?.novos || []).length} modelo(s) novo(s) nesta consulta` + (erros.length ? '; falhas: ' + erros.join('; ') : '');
+      montarBarras(); reeditar();
+    } catch (e) { msg.textContent = e.message; atualizar.disabled = false; }
+  };
+  itens.push(el('div', { class: 'perfilbar modelosbar' }, atualizar, msg));
+  const novos = CAT.descoberta?.novos || [];
+  if (novos.length) itens.push(el('p', { class: 'hint novos-info', text: `Modelos novos achados nas CLIs (marcados "novo" nas listas): ${novos.slice(0, 12).join(', ')}${novos.length > 12 ? ` e mais ${novos.length - 12}` : ''}` }));
+  if (CAT.descoberta?.emAndamento) itens.push(el('p', { class: 'hint novos-info', text: 'Descoberta de modelos em andamento; clique em Atualizar modelos daqui a pouco.' }));
+  box.replaceChildren(...itens);
+}
+function montarBarras() {
+  montarBarra($('nBarra'), { selId: 'nPerfil', valor: () => novoPerfil, desabilitado: () => false, cfg: () => novoCfg || cfgDeModo($('nModo').value),
+    aoEscolher: (nome) => {
+      novoPerfil = nome; if (!nome) return;
+      const pf = PERFIS.find((x) => x.nome === nome); if (!pf) return;
+      novoCfg = cfgDeCustom(pf.custom); $('nModo').value = 'personalizado'; $('nModelosBox').open = true;
+      editor($('nEditor'), novoCfg, { onChange: aoMudarNovo }); descNovo(); fluxoNovo();
+    },
+    aoSalvar: (nome) => { novoPerfil = nome; } });
+  montarBarra($('pBarra'), { selId: 'pPerfil', valor: () => projAtual?.perfil, desabilitado: () => projAtual?.estado === 'executando', cfg: () => projCfg || cfgDeCustom(projAtual.config),
+    aoEscolher: async (nome) => {
+      if (!nome) return;
+      try { await call('POST', `/api/projetos/${atual}/ajustes`, { perfil: nome }); projCfg = null; $('pEditorBox').classList.add('hidden'); } catch (e) { alert(e.message); }
+      refresh();
+    } });
+}
+// refaz os editores abertos (depois de atualizar o catálogo de modelos)
+function reeditar() {
+  if (vista === 'novo' && novoCfg) editor($('nEditor'), novoCfg, { onChange: aoMudarNovo });
+  if (projCfg && projAtual) editor($('pEditor'), projCfg, { editavel: projAtual.estado !== 'executando', onChange: aoMudarProj });
+}
+
+// ---------- fluxograma ----------
+const fluxoLib = () => window.DelegarFluxo || null;
+function atualizarFluxo(box, dados, forcar) {
+  const lib = fluxoLib();
+  if (!lib || box.classList.contains('hidden')) return;
+  const ass = lib.assinatura(dados);
+  if (!forcar && box.dataset.assin === ass) return;
+  box.dataset.assin = ass; lib.desenhar(box, copia(dados));
+}
+function dadosFluxoNovo() { const c = novoCfg || cfgDeModo($('nModo').value); return { cfg: { planner: c.planner, tiers: c.tiers, fix: c.fix, coord: c.coord } }; }
+function dadosFluxoProj(p) {
+  const c = p.config;
+  return { cfg: { planner: c.planner, tiers: c.tiers, fix: c.fix, coord: c.coord }, plano: p.plano || null, status: p.run?.status || null,
+    planejadorEstado: p.ocupado || p.estado === 'planejando' ? 'rodando' : 'pendente' };
+}
+const fluxoNovo = (forcar) => atualizarFluxo($('nFluxo'), dadosFluxoNovo(), forcar);
+function ligarFluxo(row, btn, box, dados) {
+  if (!fluxoLib()) { row.classList.add('hidden'); return; }
+  btn.onclick = () => {
+    const abrir = box.classList.contains('hidden');
+    box.classList.toggle('hidden', !abrir); btn.textContent = abrir ? 'Ocultar fluxo' : 'Ver fluxo'; btn.setAttribute('aria-expanded', String(abrir));
+    if (abrir) { const d = dados(); if (d) atualizarFluxo(box, d, true); }
+  };
 }
 
 // ---------- lista ----------
@@ -230,23 +338,124 @@ function render(p) {
   $('pArquivar').title = $('pExcluir').title = gestaoBloqueada ? 'Indisponível enquanto o projeto está rodando ou o planejador está pensando' : '';
   $('pEnviar').disabled = $('pGerar').disabled = p.ocupado || rodando;
   renderGates(p.run?.gates || [], p.id, $('pGates'));
+  const ps = $('pPerfil'); if (ps) { if (document.activeElement !== ps) ps.value = p.perfil || ''; ps.disabled = rodando; }
   renderMsgs(p); renderPlano(p);
+  atualizarFluxo($('pFluxo'), dadosFluxoProj(p));
   $('log').textContent = p.run?.log || '';
   $('relatorio').textContent = p.relatorio || '';
 }
 
 async function refresh() {
   if (vista === 'atividade') return refreshAtividade();
+  if (vista === 'cotas') return refreshCotas();
   if (!atual) return;
   try {
     const p = await call('GET', `/api/projetos/${atual}`);
     render(p);
+    refreshCotasProjeto(p.id);
     const ativo = p.estado === 'executando' || p.ocupado || Object.keys(p.run?.status || {}).length > 0;
     $('pAtivBox').classList.toggle('hidden', !ativo);
     if (ativo) $('pAtiv').replaceChildren(blocoAtividade(await call('GET', `/api/projetos/${atual}/atividade`)));
   } catch (e) { console.error(e); }
   carregarLista().catch(() => {});
 }
+// ---------- cotas ----------
+let cotasAtualizando = false, cotasLendo = false, cotasUltima = 0, cotasBusy = false;
+let pCotasUltima = 0, pCotasId = null;
+const emTempo = (iso) => {
+  const min = Math.round((new Date(iso) - Date.now()) / 60000);
+  if (!(min > 0)) return '';
+  const d = Math.floor(min / 1440), h = Math.floor((min % 1440) / 60), m = min % 60;
+  return ' (em ' + (d ? `${d} d ${h} h` : h ? `${h} h ${m} min` : `${m} min`) + ')';
+};
+function linhaCota(l, { compacta = false, aoAtualizar } = {}) {
+  const r = typeof l.restante === 'number' ? l.restante : null;
+  let cls = 'cota';
+  if (l.atual) cls += ' atual';
+  if (l.semCota || (r !== null && r <= 0.02)) cls += ' esgotada';
+  else if (r !== null && r < 0.2) cls += ' baixa';
+  if (r === null) cls += ' sem-leitura';
+  const nome = l.nome + (l.janela ? ' · ' + l.janela : '');
+  let pct;
+  if (l.instalado === false) pct = 'não instalado';
+  else if (l.semCota) pct = 'sem cota';
+  else if (r === null) pct = 'sem leitura';
+  else pct = Math.round(r * 100) + '% restante';
+  const info = [];
+  if (l.renovaEm) info.push('renova ' + new Date(l.renovaEm).toLocaleString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) + emTempo(l.renovaEm));
+  if (l.lidoEm) info.push('lido às ' + new Date(l.lidoEm).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }));
+  if (l.nota || l.fonte) info.push(l.nota || l.fonte);
+  const box = el('div', { class: cls }, el('span', { class: 'cota-nome', text: nome }));
+  if (r !== null) box.append(el('progress', { class: 'cota-barra', max: 100, value: Math.round(r * 100) }));
+  box.append(el('span', { class: 'cota-pct', text: pct }), el('span', { class: 'cota-info', text: info.join(' · ') }));
+  if (l.atual) {
+    const ms = (l.modelosAtuais || []).map((x) => `${x.modelo} (${x.tarefa})`).join(', ');
+    box.append(el('span', { class: 'cota-agora', text: 'trabalhando agora: ' + ms }));
+  }
+  if (!compacta) {
+    const b = el('button', { class: 'cota-btn', type: 'button', text: cotasAtualizando ? 'lendo…' : 'Atualizar', disabled: cotasAtualizando });
+    b.onclick = () => atualizarCotas(aoAtualizar);
+    box.append(b);
+  }
+  return box;
+}
+function marcarLendo(on) {
+  cotasAtualizando = on;
+  $('cotasLista').classList.toggle('cota-lendo', on);
+  for (const b of document.querySelectorAll('.cota-btn')) { b.disabled = on; b.textContent = on ? 'lendo…' : 'Atualizar'; }
+}
+function cotasMsg(t, erro) { const m = $('cotasMsg'); m.textContent = t || ''; m.className = erro ? 'erro' : 'hint'; }
+function renderCotas(d) {
+  cotasLendo = !!d.lendo;
+  const grupos = new Map();
+  for (const l of d.linhas || []) { const g = l.grupo || ''; if (!grupos.has(g)) grupos.set(g, []); grupos.get(g).push(l); }
+  const blocos = [];
+  for (const [g, ls] of grupos) { if (g) blocos.push(el('h3', { class: 'cotas-grupo', text: g })); blocos.push(...ls.map((l) => el('div', { class: 'card' }, linhaCota(l)))); }
+  $('cotasLista').replaceChildren(...(blocos.length ? blocos : [el('p', { class: 'card hint', text: 'Sem leitura de cotas ainda.' })]));
+  $('cotasLista').classList.toggle('cota-lendo', cotasAtualizando);
+  const partes = [];
+  if (d.lidoEm) partes.push('Última leitura às ' + new Date(d.lidoEm).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) + (d.idadeMin != null ? ` (há ${d.idadeMin} min)` : '') + '.');
+  if (d.lendo) partes.push('Lendo agora…');
+  if (d.aviso) partes.push(d.aviso);
+  if (d.erro) cotasMsg(d.erro, true); else cotasMsg(partes.join(' '), false);
+}
+async function refreshCotas(forcar) {
+  if (cotasBusy || cotasAtualizando) return;
+  if (!forcar && Date.now() - cotasUltima < (cotasLendo ? 5000 : 30000) - 1500) return;
+  cotasBusy = true;
+  try { renderCotas(await call('GET', '/api/cotas')); }
+  catch (e) { cotasMsg('Não foi possível ler as cotas: ' + e.message, true); }
+  finally { cotasBusy = false; cotasUltima = Date.now(); }
+  carregarLista().catch(() => {});
+}
+async function atualizarCotas(aoAtualizar) {
+  if (cotasAtualizando) return;
+  marcarLendo(true); cotasMsg('Lendo as cotas; leva de 20 a 40 s…', false);
+  let msg = null;
+  try {
+    const d = await call('POST', '/api/cotas/atualizar');
+    marcarLendo(false);
+    if (vista === 'cotas') { renderCotas(d); if (d.aviso || d.erro) msg = [d.aviso, d.erro].filter(Boolean).join(' '); }
+  } catch (e) { marcarLendo(false); msg = 'Não foi possível atualizar: ' + e.message; }
+  cotasUltima = Date.now();
+  if (msg && vista === 'cotas') cotasMsg(msg, true);
+  pCotasUltima = 0;
+  if (aoAtualizar) aoAtualizar();
+  else if (vista === 'proj') refresh();
+}
+async function refreshCotasProjeto(id) {
+  const box = $('pCotasBox');
+  if (pCotasId === id && Date.now() - pCotasUltima < 30000) return;
+  pCotasId = id; pCotasUltima = Date.now();
+  try {
+    const d = await call('GET', `/api/projetos/${id}/cotas`);
+    if (id !== atual) return;
+    const ls = d.linhas || [];
+    box.classList.toggle('hidden', !ls.length);
+    $('pCotas').replaceChildren(...ls.map((l) => linhaCota(l, { compacta: true })));
+  } catch { if (id === atual) box.classList.add('hidden'); }
+}
+
 async function refreshAtividade() {
   try {
     const as = await call('GET', '/api/atividade');
@@ -265,17 +474,20 @@ async function contarAtividade() {
 }
 function iniciarTimer() { clearInterval(timer); timer = setInterval(refresh, 4000); }
 async function abrir(id) {
-  atual = id; ultimoMsgs = -1; projCfg = null; $('pEditorBox').classList.add('hidden'); show('proj');
+  atual = id; ultimoMsgs = -1; projCfg = null; $('pEditorBox').classList.add('hidden'); delete $('pFluxo').dataset.assin; show('proj');
   history.replaceState(null, '', '#' + id);
   await refresh(); iniciarTimer();
 }
 
 // ---------- eventos da tela ----------
-const aoMudarNovo = () => { $('nModo').value = 'personalizado'; descNovo(); };
+const aoMudarNovo = () => { $('nModo').value = 'personalizado'; novoPerfil = null; const ps = $('nPerfil'); if (ps) ps.value = ''; descNovo(); fluxoNovo(); };
 $('btnNovo').onclick = () => {
   atual = null; clearInterval(timer); show('novo'); carregarLista();
-  novoCfg = cfgDeModo($('nModo').value); editor($('nEditor'), novoCfg, { onChange: aoMudarNovo });
+  novoPerfil = null; novoCfg = cfgDeModo($('nModo').value); editor($('nEditor'), novoCfg, { onChange: aoMudarNovo });
+  const ps = $('nPerfil'); if (ps) ps.value = '';
+  fluxoNovo(true);
 };
+$('btnCotas').onclick = () => { atual = null; show('cotas'); history.replaceState(null, '', '#cotas'); refreshCotas(true); iniciarTimer(); };
 $('btnAtividade').onclick = () => { atual = null; show('atividade'); history.replaceState(null, '', '#atividade'); refreshAtividade(); iniciarTimer(); };
 $('nCancelar').onclick = () => show('vazio');
 function descNovo() {
@@ -285,16 +497,17 @@ function descNovo() {
 }
 $('nModo').onchange = () => {
   const k = $('nModo').value;
-  novoCfg = cfgDeModo(k); editor($('nEditor'), novoCfg, { onChange: aoMudarNovo });
+  novoPerfil = null; novoCfg = cfgDeModo(k); editor($('nEditor'), novoCfg, { onChange: aoMudarNovo });
+  const ps = $('nPerfil'); if (ps) ps.value = '';
   if (k === 'personalizado') $('nModelosBox').open = true;
-  descNovo();
+  descNovo(); fluxoNovo();
 };
 $('nSup').onchange = descNovo;
 $('nCriar').onclick = async () => {
   $('nErro').textContent = ''; $('nCriar').disabled = true;
   try {
     const modo = $('nModo').value;
-    const p = await call('POST', '/api/projetos', { titulo: $('nTitulo').value.trim() || undefined, repo: $('nRepo').value.trim(), modo, custom: modo === 'personalizado' ? novoCfg : undefined,
+    const p = await call('POST', '/api/projetos', { titulo: $('nTitulo').value.trim() || undefined, repo: $('nRepo').value.trim(), modo, perfil: novoPerfil || undefined, custom: modo === 'personalizado' && !novoPerfil ? novoCfg : undefined,
       supervisao: $('nSup').value, auto: $('nAuto').checked, pedido: $('nPedido').value });
     try { localStorage.setItem('delegar.repo', $('nRepo').value.trim()); } catch {}
     $('nPedido').value = ''; $('nTitulo').value = '';
@@ -315,15 +528,15 @@ $('pModo').onchange = async () => {
   } catch (e) { alert(e.message); }
 };
 $('pSup').onchange = async () => { try { await call('POST', `/api/projetos/${atual}/ajustes`, { supervisao: $('pSup').value }); refresh(); } catch (e) { alert(e.message); } };
+function aoMudarProj() { $('pModo').value = 'personalizado'; const ps = $('pPerfil'); if (ps) ps.value = ''; }
 function abrirEditor(force) {
   if (!projAtual) return;
   const box = $('pEditorBox');
   if (!force && !box.classList.contains('hidden')) { box.classList.add('hidden'); projCfg = null; return; }
   const c = projAtual.config;
-  projCfg = { base: c.base || (projAtual.modo !== 'personalizado' ? projAtual.modo : null), planner: [...c.planner], fix: [...c.fix], coord: [...c.coord], maxConcurrent: c.maxConcurrent,
-    tiers: { pesado: [...flat(c.tiers.pesado)], volume: [...flat(c.tiers.volume)], leve: [...flat(c.tiers.leve)] } };
+  projCfg = cfgDeCustom({ ...c, base: c.base || (projAtual.modo !== 'personalizado' ? projAtual.modo : null) });
   const editavel = projAtual.estado !== 'executando';
-  editor($('pEditor'), projCfg, { editavel, onChange: () => { $('pModo').value = 'personalizado'; } });
+  editor($('pEditor'), projCfg, { editavel, onChange: aoMudarProj });
   $('pSalvarModo').classList.toggle('hidden', !editavel);
   $('pEditorErro').textContent = '';
   box.classList.remove('hidden');
@@ -359,10 +572,13 @@ $('pExcluir').onclick = async () => {
 };
 
 (async () => {
-  const [mo, cat] = await Promise.all([call('GET', '/api/modos'), call('GET', '/api/modelos')]);
+  const [mo, cat] = await Promise.all([call('GET', '/api/modos'), call('GET', '/api/modelos'), carregarPerfis()]);
   MODES = mo.modos; SUP = mo.supervisao; ULTIMO = mo.ultimoPersonalizado; PADRAO_CUSTOM = mo.padraoPersonalizado; CAT = cat;
   $('provs').replaceChildren(...Object.entries(CAT.provedores).map(([k, v]) => el('span', { class: 'prov ' + (v ? 'ok' : 'nao'), text: k, title: v ? 'instalado' : 'não encontrado neste PC' })));
   fillModes($('nModo')); fillModes($('pModo')); fillSup($('nSup')); fillSup($('pSup'));
+  montarBarras();
+  ligarFluxo($('nFluxoRow'), $('nFluxoBtn'), $('nFluxo'), dadosFluxoNovo);
+  ligarFluxo($('pFluxoRow'), $('pFluxoBtn'), $('pFluxo'), () => (projAtual ? dadosFluxoProj(projAtual) : null));
   $('nModo').value = 'padrao'; $('nSup').value = 'automatico'; descNovo();
   try { const r = localStorage.getItem('delegar.repo'); if (r) $('nRepo').value = r; } catch {}
   $('modosInfo').replaceChildren(
@@ -372,7 +588,8 @@ $('pExcluir').onclick = async () => {
   const h = location.hash.slice(1);
   await carregarLista();
   if (h === 'atividade') $('btnAtividade').onclick();
+  else if (h === 'cotas') $('btnCotas').onclick();
   else if (h) abrir(h);
   contarAtividade(); setInterval(contarAtividade, 8000);
-  setInterval(() => { if (!atual && vista !== 'atividade') carregarLista().catch(() => {}); }, 8000);
+  setInterval(() => { if (!atual && vista !== 'atividade' && vista !== 'cotas') carregarLista().catch(() => {}); }, 8000);
 })();

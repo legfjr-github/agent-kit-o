@@ -9,13 +9,14 @@ Você é o orquestrador. Trabalhe como um líder técnico experiente: decide o q
 
 ## Painel e CLI (caminho preferido)
 
-O sistema fica em `app/` desta skill: `server.mjs` (painel em http://127.0.0.1:8790), `cli.mjs` (comandos) e `planner.md` (instruções do planejador). Dados em `%USERPROFILE%\.delegar\` (projetos, token, logs). Relatórios no cofre em `{{VAULT_PATH}}\orquestracao\<id>.md`, com entrada no `00_INDICE.md` e no `01_LOG_DIARIO.md` ao iniciar e ao terminar.
+O sistema fica em `app/` desta skill: `server.mjs` (painel em http://127.0.0.1:8790), `cli.mjs` (comandos) e `planner.md` (instruções do planejador). Dados em `%USERPROFILE%\.delegar\` (projetos, token, logs, `perfis.json` e `modelos-descobertos.json`). Relatórios no cofre em `{{VAULT_PATH}}\orquestracao\<id>.md`, com entrada no `00_INDICE.md` e no `01_LOG_DIARIO.md` ao iniciar e ao terminar.
 
 Quando o usuário pedir para delegar (inclusive remotamente, por mensagem), encaminhe pela CLI. `SKILL` abaixo é a pasta desta skill (`%USERPROFILE%\.claude\skills\delegar`):
 
 ```powershell
 node SKILL\app\cli.mjs novo --repo <pasta> --modo padrao|equilibrado|agressivo|desespero [--acompanhamento automatico|acompanhado|passo] [--auto] [--titulo "..."] "pedido completo"
 node SKILL\app\cli.mjs novo --repo <pasta> --personalizado modo.json "pedido"   # modo personalizado
+node SKILL\app\cli.mjs novo --repo <pasta> --perfil "Nome do perfil" "pedido"   # perfil salvo
 node SKILL\app\cli.mjs esperar <id> 30      # espera o planejador, uma confirmação ou o fim (rode em segundo plano)
 node SKILL\app\cli.mjs ver <id>             # conversa recente, plano, divisão por modelo, estado, confirmações pendentes
 node SKILL\app\cli.mjs msg <id> "ajuste"    # continua a conversa com o planejador
@@ -23,7 +24,13 @@ node SKILL\app\cli.mjs plano <id>           # pede o plano final
 node SKILL\app\cli.mjs aprovar <id>         # inicia a execução
 node SKILL\app\cli.mjs confirmar <id> <confirmação> sim|nao   # responde a uma parada do modo acompanhado
 node SKILL\app\cli.mjs atividade [id]       # quem está fazendo o quê agora, últimas atualizações e commits
-node SKILL\app\cli.mjs modelos              # CLIs instaladas, catálogo e ordem do modo desespero
+node SKILL\app\cli.mjs cotas [--atualizar]  # cota restante de cada grupo, renovação e hora da leitura; --atualizar lê de novo (20 a 40 s)
+node SKILL\app\cli.mjs modelos              # CLIs instaladas, catálogo (novos marcados com [novo]) e ordem do modo desespero
+node SKILL\app\cli.mjs modelos --atualizar  # lê de novo as listas do agy e do opencode agora
+node SKILL\app\cli.mjs perfis               # lista os perfis salvos (nome, primeiro modelo do planejador, data)
+node SKILL\app\cli.mjs perfis salvar <nome> --personalizado modo.json [--sobrescrever]
+node SKILL\app\cli.mjs perfis renomear <de> <para> | perfis excluir <nome>
+node SKILL\app\cli.mjs modo <id> --perfil <nome>   # aplica um perfil salvo ao projeto, antes de aprovar
 node SKILL\app\cli.mjs status | retomar <id> | cancelar <id> | modo <id> <modo> | acompanhamento <id> <tipo>
 ```
 
@@ -51,6 +58,30 @@ Sem Claude no PC, o planejador cai para Gemini 4 Argon (agy) e depois para o mel
 **Personalizado:** no painel, "Ver e mudar os modelos" mostra as cadeias do modo escolhido; qualquer mudança transforma o modo em Personalizado. "Começar do zero" esvazia tudo. Pela CLI, `--personalizado modo.json` com `{"planner":[...],"tiers":{"pesado":[...],"volume":[...],"leve":[...]},"fix":[...],"coord":[...],"maxConcurrent":2}`; cada item é `claude|agy|opencode:<modelo>[@low|medium|high|xhigh|max]`. O último personalizado fica em `%USERPROFILE%\.delegar\personalizado.json`.
 
 **Desespero automático:** quando `quota.ps1` diz que nenhum provedor pago tem cota (Gemini estourado e Claude acima de 90% na janela de 5 h ou 95% na semanal), o pipeline passa a usar `desperateChain` (os gratuitos, do melhor para o pior) em vez de esperar 15 min, e volta ao normal quando a cota retorna. A ordem vem de um teste de 12/11/2026 (ver a nota do cofre `guias_e_comandos/skill_delegar_orquestracao.md`).
+
+### Perfis salvos
+
+Um perfil é um modo personalizado com nome, guardado em `%USERPROFILE%\.delegar\perfis.json` (até 50). Serve para reaproveitar a mesma escolha de modelos em vários projetos.
+
+- **Painel:** acima do editor de modelos, na tela de projeto novo e na tela do projeto, há a barra **Perfil**: lista de perfis, **Salvar como perfil** (guarda os modelos atuais; nome repetido pergunta se substitui), **Renomear** e **Excluir perfil**. Escolher um perfil o aplica; editar qualquer modelo depois solta o vínculo e o modo volta a Personalizado. Com o projeto rodando, a lista fica travada.
+- **CLI:** `perfis` lista; `perfis salvar <nome> --personalizado modo.json` grava (nome repetido dá erro sem `--sobrescrever`); `perfis renomear <de> <para>`; `perfis excluir <nome>`; `novo --perfil <nome>` cria o projeto já com o perfil; `modo <id> --perfil <nome>` aplica a um projeto existente.
+- **Nome:** de 1 a 60 caracteres, começando por letra ou número, com letras, números, espaço e `. _ ( ) + -`; maiúscula e minúscula contam como o mesmo nome. Nomes como `__proto__` e `constructor` são recusados. O nome só viaja no corpo da requisição, nunca no caminho, e nunca vira nome de arquivo.
+- **Validação:** as cadeias de cada perfil passam pela mesma checagem do modo personalizado ao salvar, ao ler do disco e ao aplicar. Perfil inválido no arquivo é ignorado com aviso; arquivo ilegível é guardado como `perfis.json.corrompido-<data>` e a lista recomeça vazia.
+- O projeto guarda uma cópia dos modelos do perfil. Renomear ou excluir o perfil depois não muda projetos que já o usam.
+
+### Fluxograma
+
+O botão **Ver fluxo** (na tela de projeto novo, abaixo do editor de modelos, e no cartão "Plano e divisão" do projeto) desenha o caminho do trabalho: planejador, escritores por nível, integrador, fim e, ao lado, correção e coordenador de falhas, cada um com a cadeia de modelos. Antes do plano, é a previsão do modo escolhido; com plano, mostra as tarefas e suas dependências, e durante a execução o estado de cada uma (na fila, rodando, concluída, falhou, pulada) e o modelo em uso. Mudar o modo ou os modelos redesenha na hora. É só leitura: não altera nada.
+
+### Descoberta de modelos
+
+O painel descobre sozinho modelos novos do Antigravity e do opencode:
+
+- **Quando:** logo depois que o painel sobe (em segundo plano, sem atrasar o início nem derrubar o processo se uma CLI falhar ou travar; limite de 45 s por CLI), pelo botão **Atualizar modelos** do painel e por `cli.mjs modelos --atualizar`. Roda `agy models` e `opencode models`, sem shell com texto interpolado, e mata o processo se passar do limite.
+- **Onde fica:** o acumulado vai para `%USERPROFILE%\.delegar\modelos-descobertos.json` (primeira e última vez que cada id apareceu, quando a consulta rodou, erros por CLI). Um arquivo corrompido ou maior que 1 MB é guardado como `.corrompido-<data>` e a lista recomeça vazia.
+- **Validação:** só entra id que a própria descoberta teria aceitado (`provedor:modelo`, sem `-` na frente, sem `//`, `.` ou `..`), tanto ao ler a saída da CLI quanto ao ler o arquivo. Id inválido, mesmo escrito à mão no arquivo, não chega ao catálogo nem às cadeias dos trabalhadores.
+- **Marca novo:** modelo que não está na lista fixa de `app/modelos.mjs` nem nas dicas aparece com "novo" nas listas do editor e em `modelos` (`[novo]`).
+- **Modo desespero:** os gratuitos novos do opencode (id terminado em `-free`) entram no fim da ordem do desespero, no máximo 10, na ordem em que foram descobertos, e ficam ali até alguém ranquear o modelo medindo-o como no teste de 12/11/2026 e movê-lo para `DESESPERO` em `app/modelos.mjs`. Modelo novo que não é gratuito só aparece nas listas; não entra em nenhuma cadeia sozinho.
 
 ### Acompanhamento
 
@@ -159,12 +190,21 @@ Use o modo autônomo acima. Os passos abaixo valem quando você mesmo encadeia (
 
 ## Cotas
 
-Antes de cada rodada, leia `scripts/quota.ps1` (leva ~10 s, gasta um prompt mínimo no Haiku):
-- **Claude:** leitura real da janela de 5 h e da semanal (`utilization`, `resetsAt`).
-- **Gemini:** o agy não expõe a cota. O script usa o registro `%USERPROFILE%\.delegar\state\quota-ledger.jsonl` (o `worker.ps1` grava ali cada estouro) e, se existir e tiver menos de 6 h, o arquivo manual `%USERPROFILE%\.delegar\state\gemini.json` (`usedPercent`, `resetsAt`, `updated`) que você preenche quando o usuário informar a cota vista no Antigravity. Sem informação, o Gemini vale 1 trabalhador; estouro há menos de 5 h vale 0 (vá direto para Sonnet/Haiku).
+Antes de cada rodada, leia `scripts/quota.ps1` (leva cerca de 30 s: o agy responde em ~18 s, com limite de 60 s, e a sonda do Claude gasta um prompt mínimo no Haiku). O mesmo dado aparece no painel, no botão **Cotas** e no bloco "Cotas dos modelos deste projeto", e pelo comando `cli.mjs cotas`.
+
+- **Grupos do Antigravity:** o script roda `agy --p /usage` e lê três grupos:
+  - Gemini (`agy:gemini-*`): janelas de 5 h e semanal;
+  - Gemini 4 Argon (`agy:*argon*`): semanal;
+  - Claude e GPT via Antigravity (`agy:claude-*` e `agy:gpt-*`): janelas de 5 h e semanal.
+- O agy informa o que **resta**. O script guarda o que foi **usado** (de 0 a 1) nos campos `fiveHour` e `sevenDay` e acrescenta `fiveHourRemaining` e `sevenDayRemaining`. Gemini com 2% ou menos restante na janela de 5 h ou na semanal fica com 0 trabalhadores.
+- **Se a leitura falhar:** valem, nessa ordem, a última leitura boa (até 6 h), o arquivo manual `%USERPROFILE%\.delegar\state\gemini.json` (`usedPercent`, `resetsAt`, `updated`) e o registro de estouros `quota-ledger.jsonl` (o `worker.ps1` grava ali cada estouro; estouro há menos de 5 h vale 0, vá direto para Sonnet/Haiku). Sem nenhum deles, o Gemini vale 1 trabalhador.
+- **Cache:** `quota-last.json` guarda a última leitura. Com `-MaxAgeMinutes`, o script reaproveita essa leitura se ela for mais nova que o limite, sem chamar o agy. A pasta de estado é `%USERPROFILE%\.delegar\state`, ou a de `DELEGAR_DATA` quando a variável existe.
+- **Testes:** `-SkipAgy` pula a leitura do agy; `-AgyUsageFile <arquivo>` lê uma saída guardada.
+- **Claude direto (`claude:`):** leitura real da janela de 5 h e da semanal (`utilization`, `resetsAt`).
+- **Painel e API:** `GET /api/cotas` responde com o cache de até 10 min; se ele estiver mais velho, a leitura roda em segundo plano e a resposta sai na hora com `lendo=true`. `POST /api/cotas/atualizar` força uma leitura, uma por vez, com intervalo mínimo de 30 s. `GET /api/projetos/<id>/cotas` traz só os grupos usados nas cadeias do projeto. Todas exigem o token.
 - `recommendedConcurrent` soma as duas recomendações (máximo 3). O segundo trabalhador é seguro mesmo com a cota do Gemini incerta quando o Claude tem folga, porque a cadeia de reserva cai no Sonnet.
 
-Acelere (2 simultâneos, raramente 3) quando a cota estiver quase cheia ou quando sobrar bastante e a janela estiver perto de renovar (cota que seria perdida). Reduza para 1 quando qualquer provedor passar de ~80%. Se todos estiverem acima de 90%, pare e avise o usuário com os horários de renovação.
+Acelere (2 simultâneos, raramente 3) quando a cota estiver quase cheia ou quando sobrar bastante e a janela estiver perto de renovar (cota que seria perdida). Reduza para 1 quando qualquer provedor passar de ~80% usado. Se todos estiverem acima de 90% usado, pare e avise o usuário com os horários de renovação.
 
 ## Paralelismo
 

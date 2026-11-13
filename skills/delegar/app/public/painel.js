@@ -88,15 +88,45 @@ function editor(box, cfg, { editavel = true, onChange } = {}) {
 }
 
 // ---------- lista ----------
+// estado da seção "Concluídos" (expandida ou não) e da seção "Arquivados" (aberta ou não):
+// a lista é refeita a cada 8 s e essas escolhas não podem se perder
+let concluidosTodos = false, arquivadosAbertos = false;
+function itemLista(p) {
+  const b = el('button', { class: 'item' + (p.id === atual ? ' ativo' : '') }, el('strong', { text: p.titulo }),
+    el('small', { text: `${ESTADOS[p.estado] || p.estado} · ${p.modoNome}${p.ocupado ? ' · pensando…' : ''}` }),
+    p.gates ? el('small', { class: 'alerta', text: `${p.gates} confirmação pendente` }) : null);
+  b.onclick = () => abrir(p.id);
+  return b;
+}
+const tituloSecao = (t, n) => el('h3', { class: 'secao', text: `${t} (${n})` });
 async function carregarLista() {
   const ps = await call('GET', '/api/projetos');
-  $('lista').replaceChildren(...(ps.length ? ps.map((p) => {
-    const b = el('button', { class: 'item' + (p.id === atual ? ' ativo' : '') }, el('strong', { text: p.titulo }),
-      el('small', { text: `${ESTADOS[p.estado] || p.estado} · ${p.modoNome}${p.ocupado ? ' · pensando…' : ''}` }),
-      p.gates ? el('small', { class: 'alerta', text: `${p.gates} confirmação pendente` }) : null);
-    b.onclick = () => abrir(p.id);
-    return b;
-  }) : [el('p', { class: 'hint', text: 'Sem projetos ainda.' })]));
+  const g = { aguardando: [], rodando: [], conversa: [], concluidos: [], arquivados: [] };
+  for (const p of ps) {
+    if (p.arquivado) g.arquivados.push(p);
+    else if (p.gates > 0 || p.estado === 'plano_pronto' || ['interrompido', 'incompleto'].includes(p.estado)) g.aguardando.push(p);
+    else if (p.estado === 'executando' || p.ocupado) g.rodando.push(p);
+    else if (['concluido', 'cancelado'].includes(p.estado)) g.concluidos.push(p);
+    else g.conversa.push(p); // planejando/conversando, e qualquer estado novo que não esteja listado aqui
+  }
+  const blocos = [];
+  if (g.aguardando.length) blocos.push(tituloSecao('Aguardando você', g.aguardando.length), ...g.aguardando.map(itemLista));
+  if (g.rodando.length) blocos.push(tituloSecao('Rodando', g.rodando.length), ...g.rodando.map(itemLista));
+  if (g.conversa.length) blocos.push(tituloSecao('Em conversa', g.conversa.length), ...g.conversa.map(itemLista));
+  if (g.concluidos.length) {
+    const n = g.concluidos.length;
+    blocos.push(tituloSecao('Concluídos', n), ...(concluidosTodos ? g.concluidos : g.concluidos.slice(0, 5)).map(itemLista));
+    if (n > 5) {
+      const ver = el('button', { class: 'mais', text: concluidosTodos ? 'mostrar só os 5 últimos' : `ver todos (${n})` });
+      ver.onclick = () => { concluidosTodos = !concluidosTodos; carregarLista().catch(() => {}); };
+      blocos.push(ver);
+    }
+  }
+  if (g.arquivados.length) {
+    blocos.push(el('details', { class: 'arquivados', open: arquivadosAbertos, ontoggle: (e) => { arquivadosAbertos = e.target.open; } },
+      el('summary', { class: 'secao', text: `Arquivados (${g.arquivados.length})` }), ...g.arquivados.map(itemLista)));
+  }
+  $('lista').replaceChildren(...(ps.length ? blocos : [el('p', { class: 'hint', text: 'Sem projetos ainda.' })]));
 }
 
 // ---------- projeto ----------
@@ -194,6 +224,10 @@ function render(p) {
   $('pAprovar').textContent = ['concluido', 'incompleto', 'cancelado', 'interrompido'].includes(p.estado) ? 'Executar o plano de novo' : 'Aprovar e iniciar';
   $('pRetomar').classList.toggle('hidden', !['incompleto', 'cancelado', 'interrompido'].includes(p.estado));
   $('pCancelar').classList.toggle('hidden', !rodando);
+  const gestaoBloqueada = rodando || p.ocupado;
+  $('pArquivar').textContent = p.arquivado ? 'Desarquivar' : 'Arquivar';
+  $('pArquivar').disabled = $('pExcluir').disabled = gestaoBloqueada;
+  $('pArquivar').title = $('pExcluir').title = gestaoBloqueada ? 'Indisponível enquanto o projeto está rodando ou o planejador está pensando' : '';
   $('pEnviar').disabled = $('pGerar').disabled = p.ocupado || rodando;
   renderGates(p.run?.gates || [], p.id, $('pGates'));
   renderMsgs(p); renderPlano(p);
@@ -309,6 +343,19 @@ $('pRetomar').onclick = async () => { try { await call('POST', `/api/projetos/${
 $('pCancelar').onclick = async () => {
   if (!confirm('Cancelar a execução? Os agentes em andamento serão encerrados.')) return;
   try { await call('POST', `/api/projetos/${atual}/cancelar`); refresh(); } catch (e) { alert(e.message); }
+};
+
+$('pArquivar').onclick = async () => {
+  try { await call('POST', `/api/projetos/${atual}/arquivar`, { arquivar: !projAtual.arquivado }); await refresh(); } catch (e) { alert(e.message); }
+};
+$('pExcluir').onclick = async () => {
+  if (!confirm(`Excluir o projeto "${projAtual.titulo}"?\n\nEle vai para a lixeira do orquestrador. O repositório e o relatório no cofre não são afetados.`)) return;
+  try {
+    await call('POST', `/api/projetos/${atual}/excluir`, { confirmar: atual });
+    atual = null; projAtual = null; clearInterval(timer);
+    history.replaceState(null, '', location.pathname);
+    show('vazio'); await carregarLista();
+  } catch (e) { alert(e.message); }
 };
 
 (async () => {

@@ -12,7 +12,9 @@
 //   node cli.mjs confirmar <id> <confirmação> [sim|nao]   responde a uma parada do modo acompanhado
 //   node cli.mjs atividade [id]                  quem está fazendo o quê agora e as últimas atualizações
 //   node cli.mjs modelos                         provedores instalados, modelos e a ordem do modo desespero
-//   node cli.mjs status                          lista os projetos
+//   node cli.mjs arquivar <id> | desarquivar <id>   tira o projeto da lista (ou devolve)
+//   node cli.mjs excluir <id>                    move a pasta do projeto para a lixeira (DATA/lixeira); não toca no repositório
+//   node cli.mjs status [--todos]                lista os projetos; --todos inclui os arquivados
 //   node cli.mjs esperar <id> [minutos]          espera o planejador responder, uma confirmação ou o fim da execução
 // O pedido também pode vir de um arquivo: --arquivo <caminho>.
 // modo.json (personalizado): {"planner":[...],"tiers":{"pesado":[...],"volume":[...],"leve":[...]},"fix":[...],"coord":[...],"maxConcurrent":2}
@@ -36,7 +38,13 @@ async function ensure() {
   const log = fs.openSync(path.join(DATA, 'server.log'), 'a');
   const ch = spawn(process.execPath, [path.join(HERE, 'server.mjs')], { detached: true, stdio: ['ignore', log, log], windowsHide: true });
   ch.unref();
-  for (let i = 0; i < 30; i++) { await sleep(300); if (await up()) return; }
+  for (let i = 0; i < 30; i++) {
+    await sleep(300);
+    if (await up()) {
+      if (!process.env.DELEGAR_LANCADOR) console.error('Aviso: o painel foi aberto por este comando. Se ele rodou dentro de uma sessão de agente, o painel cai quando a sessão ou o app fechar. Para ficar no ar, abra pelo atalho "Orquestrador de IA (Delegar)" (iniciar-painel.bat).');
+      return;
+    }
+  }
   throw new Error('o painel não subiu; veja ' + path.join(DATA, 'server.log'));
 }
 const token = () => fs.readFileSync(path.join(DATA, 'token'), 'utf8').trim();
@@ -52,6 +60,7 @@ function opts(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--auto') o.auto = true;
+    else if (a === '--todos') o.todos = true;
     else if (a.startsWith('--')) o[a.slice(2)] = argv[++i];
     else o._.push(a);
   }
@@ -100,6 +109,8 @@ try {
     case 'acompanhamento': mostrar(await call('POST', `/api/projetos/${o._[0]}/ajustes`, { supervisao: o._[1] }), 0); break;
     case 'confirmar': mostrar(await call('POST', `/api/projetos/${o._[0]}/confirmar`, { gate: o._[1], decisao: o._[2] === 'nao' ? 'nao' : 'sim' }), 0); break;
     case 'aprovar': case 'retomar': case 'cancelar': mostrar(await call('POST', `/api/projetos/${o._[0]}/${cmd}`), 1); break;
+    case 'arquivar': case 'desarquivar': { const p = await call('POST', `/api/projetos/${o._[0]}/arquivar`, { arquivar: cmd === 'arquivar' }); console.log(`Projeto ${p.id} ${p.arquivado ? 'arquivado' : 'desarquivado'}.`); break; }
+    case 'excluir': { const r = await call('POST', `/api/projetos/${o._[0]}/excluir`, { confirmar: o._[0] }); console.log(`Projeto movido para a lixeira: ${r.lixeira}`); break; }
     case 'ver': mostrar(await call('GET', `/api/projetos/${o._[0]}`), Number(o.n) || 3); break;
     case 'atividade': {
       const as = o._[0] ? [await call('GET', `/api/projetos/${o._[0]}/atividade`)] : await call('GET', '/api/atividade');
@@ -113,7 +124,7 @@ try {
       for (const m of c.modelos) console.log(`  ${m.instalado ? ' ' : 'x'} ${m.id}${m.dica ? '  - ' + m.dica : ''}`);
       break;
     }
-    case 'status': for (const p of await call('GET', '/api/projetos')) console.log(`${p.id}  ${p.estado}${p.ocupado ? '*' : ''}${p.gates ? ' (confirmação pendente)' : ''}  ${p.modoNome}  ${p.titulo}`); break;
+    case 'status': for (const p of (await call('GET', '/api/projetos')).filter((x) => o.todos || !x.arquivado)) console.log(`${p.arquivado ? '[arquivado] ' : ''}${p.id}  ${p.estado}${p.ocupado ? '*' : ''}${p.gates ? ' (confirmação pendente)' : ''}  ${p.modoNome}  ${p.titulo}`); break;
     case 'esperar': {
       const lim = Date.now() + (Number(o._[1]) || 60) * 60000; let p;
       do {

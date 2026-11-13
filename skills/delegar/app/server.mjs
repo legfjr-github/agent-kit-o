@@ -10,6 +10,14 @@ import { fileURLToPath } from 'node:url';
 import { ENTRY_RE, QUOTA_RE, DESESPERO, adaptar, catalogo, detectar, atualizarListas } from './modelos.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+// server.log com data e hora e com o motivo da saída. Se o painel sumir sem a linha "painel saiu",
+// o processo foi encerrado de fora (ex.: fechou a sessão do agente que o abriu).
+for (const k of ['log', 'error']) { const orig = console[k].bind(console); console[k] = (...a) => orig(`[${new Date().toLocaleString('sv-SE')}]`, ...a); }
+process.on('uncaughtException', (e) => { console.error('erro não tratado, o painel vai fechar:', e); process.exit(1); });
+process.on('unhandledRejection', (e) => console.error('promessa rejeitada sem tratamento:', e));
+for (const s of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP']) process.on(s, () => { console.log(`painel encerrado pelo sinal ${s}`); process.exit(0); });
+process.on('exit', (c) => console.log(`painel saiu (código ${c}, pid ${process.pid})`));
 const SCRIPTS = path.join(HERE, '..', 'scripts');
 const PUBLIC = path.join(HERE, 'public');
 const PORT = Number(process.env.DELEGAR_PORT) || 8790;
@@ -679,8 +687,15 @@ function modoPublico(p) {
   const m = cfgDe(p);
   return { planner: m.planner, tiers: m.tiers, fix: m.fix, coord: m.coord, maxConcurrent: m.maxConcurrent, base: m.base || null };
 }
+// Projeto que roda ou cujo planejador responde não pode ser arquivado nem excluído.
+function ocupadoDemais(p) { return p.estado === 'executando' || !!p.ocupado || !!(p.pid && alive(p.pid)); }
+function desarquivarSePreciso(p) {
+  if (!p.arquivado) return;
+  p.arquivado = false; delete p.arquivadoEm; save(p);
+  evento(p, { tipo: 'projeto', texto: 'desarquivado' });
+}
 function publicView(p, full) {
-  const v = { id: p.id, titulo: p.titulo, modo: p.modo, modoNome: nomeModo(p), supervisao: supDe(p), estado: p.estado, auto: p.auto, repo: p.repo, criado: p.criado, inicio: p.inicio, fim: p.fim, ocupado: !!p.ocupado };
+  const v = { id: p.id, titulo: p.titulo, modo: p.modo, modoNome: nomeModo(p), supervisao: supDe(p), estado: p.estado, auto: p.auto, repo: p.repo, criado: p.criado, inicio: p.inicio, fim: p.fim, ocupado: !!p.ocupado, arquivado: !!p.arquivado };
   if (!full) { v.gates = p.estado === 'executando' ? gatesPendentes(p).length : 0; return v; }
   v.pedido = p.pedido; v.mensagens = p.mensagens; v.planejador = p.planejador || null;
   v.config = modoPublico(p); v.plannerEfetivo = adaptar(cfgDe(p).planner);
@@ -749,6 +764,7 @@ async function api(req, res, url) {
   const running = p.estado === 'executando';
   switch (parts[3]) {
     case 'mensagem': {
+      desarquivarSePreciso(p);
       const t = String(b.texto || '').trim();
       if (!t || t.length > 50000) return send(res, 400, { erro: 'mensagem vazia' });
       if (p.ocupado) return busy();
@@ -758,6 +774,7 @@ async function api(req, res, url) {
       return send(res, 202, { ok: true });
     }
     case 'gerar-plano': {
+      desarquivarSePreciso(p);
       if (p.ocupado) return busy();
       if (running) return send(res, 409, { erro: 'execução em andamento' });
       p.mensagens.push({ papel: 'usuario', texto: '(pediu o plano final)', quando: now() }); save(p);
@@ -783,14 +800,35 @@ async function api(req, res, url) {
       return send(res, 200, publicView(p, true));
     }
     case 'aprovar': {
+      desarquivarSePreciso(p);
       if (!p.plano) return send(res, 400, { erro: 'sem plano' });
       if (running) return send(res, 409, { erro: 'já está executando' });
       return send(res, 200, publicView(startPipeline(p), true));
     }
     case 'retomar': {
+      desarquivarSePreciso(p);
       if (!fs.existsSync(path.join(pdir(p.id), 'plan.json'))) return send(res, 400, { erro: 'nada para retomar' });
       if (running && alive(p.pid)) return send(res, 409, { erro: 'já está executando' });
       return send(res, 200, publicView(startPipeline(p, true), true));
+    }
+    case 'arquivar': {
+      const arq = b.arquivar === true;
+      if (arq && ocupadoDemais(p)) return send(res, 409, { erro: 'não dá para arquivar enquanto roda ou o planejador responde' });
+      p.arquivado = arq;
+      if (arq) p.arquivadoEm = now(); else delete p.arquivadoEm;
+      save(p); evento(p, { tipo: 'projeto', texto: arq ? 'arquivado' : 'desarquivado' });
+      return send(res, 200, publicView(p, true));
+    }
+    case 'excluir': {
+      if (b.confirmar !== p.id) return send(res, 400, { erro: 'confirmação inválida' });
+      if (ocupadoDemais(p)) return send(res, 409, { erro: 'não dá para excluir enquanto roda ou o planejador responde' });
+      const origem = path.resolve(pdir(p.id));
+      if (!origem.startsWith(path.resolve(PROJ) + path.sep)) return send(res, 400, { erro: 'caminho inválido' });
+      const lixeira = path.join(DATA, 'lixeira'); fs.mkdirSync(lixeira, { recursive: true });
+      const destino = path.join(lixeira, `${p.id}-${Date.now()}`);
+      fs.renameSync(origem, destino);
+      console.log(`projeto ${p.id} movido para ${destino}`);
+      return send(res, 200, { ok: true, lixeira: destino });
     }
     case 'cancelar': {
       if (p.pid && alive(p.pid)) await new Promise((r) => execFile('taskkill', ['/PID', String(p.pid), '/T', '/F'], () => r()));
@@ -826,4 +864,5 @@ const server = http.createServer(async (req, res) => {
 for (const p of listAll()) if (p.ocupado) { p.ocupado = false; p.mensagens.push({ papel: 'sistema', texto: 'O servidor reiniciou durante a resposta do planejador. Envie a mensagem de novo.', quando: now() }); save(p); }
 detectar(); atualizarListas();
 setInterval(poll, 10000);
-server.listen(PORT, '127.0.0.1', () => console.log(`Delegar em http://127.0.0.1:${PORT} · provedores: ${Object.entries(detectar()).filter(([, v]) => v).map(([k]) => k).join(', ') || 'nenhum'}`));
+server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `porta ${PORT} já em uso; outro painel está no ar` : e); process.exit(1); });
+server.listen(PORT, '127.0.0.1', () => console.log(`Delegar em http://127.0.0.1:${PORT} (pid ${process.pid}) · provedores: ${Object.entries(detectar()).filter(([, v]) => v).map(([k]) => k).join(', ') || 'nenhum'}`));

@@ -18,6 +18,7 @@ export const QUOTA_RE = /(quota|rate[ _-]?limit|RESOURCE_EXHAUSTED|\b429\b|usage
 // rodando os testes, 10 testes ocultos. Desempate: resultados anteriores e tempo.
 // Detalhes em vault/guias_e_comandos/skill_delegar_orquestracao.md, seção "Modelos gratuitos".
 export const DESESPERO = [
+  'opencode:nvidia/minimaxai/minimax-m3.1-flash', // NVIDIA (17/11/2026): respondeu em 20 s; cota sem limite total, só por requisições/minuto. Preferido entre os gratuitos.
   'opencode:opencode/glm-5.3-flash-free',      // 20/20 e 10/10
   'opencode:opencode/big-pickle',               // 20/20 e 10/10; o mais rápido (17 a 22 s)
   'opencode:opencode/minimax-m3.1-flash-free',  // 10/10 (a falha da tarefa 1 foi de caminho curto do Windows)
@@ -39,6 +40,7 @@ export const DICAS = {
   'agy:gemini-3.8-flash-medium': 'Bom equilíbrio entre custo e qualidade.',
   'agy:gemini-3.8-flash-low': 'Mecânico e barato.',
   'agy:gpt-oss-120b-medium': 'Fora da cota do Gemini; reserva do modo desespero.',
+  'opencode:nvidia/minimaxai/minimax-m3.1-flash': 'Gratuito pela NVIDIA (build.nvidia.com): sem cota total, só limite por minuto. 1º da reserva gratuita. GLM e DeepSeek da NVIDIA falharam no teste de 17/11 (travou e 410).',
   'opencode:opencode/glm-5.3-flash-free': 'Gratuito. 1º no teste de 12/11 (30/30).',
   'opencode:opencode/big-pickle': 'Gratuito. 30/30 no teste de 12/11; o mais rápido.',
   'opencode:opencode/minimax-m3.1-flash-free': 'Gratuito. Acertou a correção de bugs; errou caminho curto do Windows na outra tarefa.',
@@ -58,7 +60,7 @@ const FIXOS = {
   claude: ['opus', 'sonnet', 'haiku', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-2'],
   agy: ['gemini-4-argon-high', 'gemini-4-argon-medium', 'gemini-4-argon-low', 'gemini-3.8-flash-high', 'gemini-3.8-flash-medium',
     'gemini-3.8-flash-low', 'claude-opus-5-5-high', 'claude-sonnet-5-5-high', 'claude-sonnet-5-5-medium', 'gpt-oss-120b-medium'],
-  opencode: ['opencode/glm-5.3-flash-free', 'opencode/deepseek-v4.1-flash-free', 'opencode/minimax-m3.1-flash-free',
+  opencode: ['nvidia/minimaxai/minimax-m3.1-flash', 'opencode/glm-5.3-flash-free', 'opencode/deepseek-v4.1-flash-free', 'opencode/minimax-m3.1-flash-free',
     'opencode/mimo-v2.6-flash-free', 'opencode/big-pickle', 'opencode/longcat-2.5-free', 'opencode/nemotron-3.5-super-vl-free',
     'opencode/nemotron-3.5-lightning-free', 'opencode/iceman-free', 'opencode/inkling-2-small-free', 'opencode/beam-free',
     'opencode/flint-40b-free', 'nvidia/z-ai/glm-5.3-flash'],

@@ -33,6 +33,7 @@ node SKILL\app\cli.mjs perfis               # lista os perfis salvos (nome, prim
 node SKILL\app\cli.mjs perfis salvar <nome> --personalizado modo.json [--sobrescrever]
 node SKILL\app\cli.mjs perfis renomear <de> <para> | perfis excluir <nome>
 node SKILL\app\cli.mjs modo <id> --perfil <nome>   # aplica um perfil salvo ao projeto, antes de aprovar
+node SKILL\app\cli.mjs migrar-rodadas <id>     # migra pasta antiga rodadas/1/ para o formato unificado de rodadas
 node SKILL\app\cli.mjs status | retomar <id> | cancelar <id> | modo <id> <modo> | velocidade <id> <valor> | acompanhamento <id> <tipo>
 ```
 
@@ -40,6 +41,7 @@ node SKILL\app\cli.mjs status | retomar <id> | cancelar <id> | modo <id> <modo> 
 - Com `--auto`: o planejador não pergunta, gera o plano e a execução começa sozinha.
 - Abrir o painel: o usuário dá dois cliques em `SKILL\iniciar-painel.bat` (ou no atalho "Orquestrador de IA (Delegar)", ou na pasta Inicializar com `--sem-navegador`). Se o painel estiver fora do ar, peça isso a ele. O primeiro comando da CLI também sobe o painel, mas aí ele fica preso à sessão do agente e cai quando a sessão ou o app fecham (caso de 13/11/2026). Logs: `%USERPROFILE%\.delegar\startup.log` e `server.log` (com data e hora; sem a linha "painel saiu", o processo foi encerrado de fora).
 - O usuário acompanha e aprova em http://127.0.0.1:8790 (conversa, plano, modelos por tarefa, editor de modelos, acompanhamento, confirmações, atividade ao vivo, log).
+- **Acesso exclusivo deste computador (17/11/2026):** o painel escuta apenas em `127.0.0.1` (recusa subir se `DELEGAR_HOST`, `HOST` ou `--host` apontar para outro endereço) e `ehLoopback` recusa com HTTP 403 (`acesso só deste computador`) qualquer `remoteAddress` fora de `127.0.0.1`, `::1` e `::ffff:127.0.0.1` antes do token e do `Host`, inclusive em `/api/saude` e arquivos estáticos.
 - Pedido longo: grave num arquivo e use `--arquivo <caminho>`.
 - Confirmação pendente: não confirme no lugar do usuário. Mostre o motivo e pergunte; só rode `confirmar` com a resposta dele.
 
@@ -97,6 +99,17 @@ Um perfil é um modo personalizado com nome, guardado em `%USERPROFILE%\.delegar
 - **Validação:** as cadeias de cada perfil passam pela mesma checagem do modo personalizado ao salvar, ao ler do disco e ao aplicar. Perfil inválido no arquivo é ignorado com aviso; arquivo ilegível é guardado como `perfis.json.corrompido-<data>` e a lista recomeça vazia.
 - O projeto guarda uma cópia dos modelos do perfil. Renomear ou excluir o perfil depois não muda projetos que já o usam.
 
+### Histórico de rodadas e continuação de projetos
+
+Ao continuar um projeto em estado `concluido` ou `cancelado` enviando uma nova mensagem (`cli.mjs msg <id> "..."` ou pelo painel), a execução anterior é arquivada automaticamente em uma rodada:
+
+- **Estrutura no `project.json`:** a execução finalizada é guardada no array `p.rodadas[]` com número da rodada, título, estado, modo, velocidade, supervisão, planejador, horários, plano com tarefas, resumo da execução e uso de tokens. Os campos ativos de `p` são limpos para o novo ciclo de planejamento.
+- **Isolamento de logs:** os arquivos da rodada concluída são movidos de `logs/` para `logs/rodada-N/` (incluindo `status.json`, `summary.md`, `plan.json` e as pastas de cada tarefa). Ao iniciar a execução seguinte, apenas os arquivos da raiz de `logs/` são limpos, preservando intactas as pastas `logs/rodada-*/`.
+- **Contexto para o planejador:** ao planejar a próxima rodada, o histórico consolidado das rodadas anteriores é injetado no prompt do planejador. Em sessões retomadas com o mesmo planejador via CLI, o contexto pendente da rodada antecede a mensagem do usuário.
+- **Soma de tokens e custos:** o consumo de tokens e custos é calculado por rodada e somado no total acumulado do projeto em todas as saídas (`/api/projetos/:id/uso`, `/api/uso`, `cli.mjs uso <id>`, resumo final e relatórios do cofre). Tarefas de rodadas anteriores aparecem identificadas com o prefixo da rodada (exemplo: `R1 · t1`).
+- **Painel:** exibe a seção "Rodadas anteriores" recolhida em sanfona (`<details>`), com tarefas, modelos, status, prompts e uso de cada rodada.
+- **Migração de formato antigo:** projetos que executavam salvando na pasta legada `rodadas/<N>/` na raiz são detectados automaticamente ou pelo comando `cli.mjs migrar-rodadas <id>`. Em projetos em andamento, o endpoint devolve 409 e o uso soma a rodada legada em memória; após a conclusão, a chamada consolida a rodada em `p.rodadas[]` e cria `logs/rodada-1/`, mantendo a pasta original preservada.
+
 ### Fluxograma
 
 O botão **Ver fluxo** (na tela de projeto novo, abaixo do editor de modelos, e no cartão "Plano e divisão" do projeto) desenha o caminho do trabalho: planejador, escritores por nível, integrador, fim e, ao lado, correção e coordenador de falhas, cada um com a cadeia de modelos. Antes do plano, é a previsão do modo escolhido; com plano, mostra as tarefas e suas dependências, e durante a execução o estado de cada uma (na fila, rodando, concluída, falhou, pulada) e o modelo em uso. Mudar o modo ou os modelos redesenha na hora. É só leitura: não altera nada.
@@ -143,7 +156,7 @@ Modelos disponíveis no agy: `agy models` (ex.: `gemini-3.8-flash-high|medium|lo
 
 ## Executar um trabalhador
 
-Use o script `scripts/worker.ps1` (PowerShell 5.1). Ele roda o prompt na primeira opção da cadeia; se a saída indicar cota ou limite (quota, rate limit, 429, RESOURCE_EXHAUSTED, usage limit), passa para a próxima, avisando o novo modelo de que o trabalho pode estar pela metade.
+Use o script `scripts/worker.ps1` (PowerShell 5.1). Ele roda o prompt na primeira opção da cadeia; se a saída indicar cota ou limite (quota, rate limit, 429, RESOURCE_EXHAUSTED, usage limit), passa para a próxima, avisando o novo modelo de que o trabalho pode estar pela metade. `worker.ps1` e `quota.ps1` separam estouros do ledger por grupo (`gemini`, `argon`, `agyClaudeGpt`) e pulam `agy:claude-*` e `agy:gpt-*` quando `agyClaudeGpt` está esgotado. O `worker.ps1` também monitora todas as CLIs com um vigia que encerra tentativas sem saída nem evento por 20 min (`-IdleTimeoutMinutes 20`), registra o evento `vigia` em `events.jsonl` e passa ao próximo modelo.
 
 ```powershell
 & "$env:USERPROFILE\.claude\skills\delegar\scripts\worker.ps1" `
@@ -174,10 +187,10 @@ Para não depender desta sessão nem do usuário entre um lote e outro, você pl
 1. Escreva os prompts (um por tarefa) e um `plan.json` numa pasta do plano (ex.: `<repo>-plano\<nome>\`, fora do repositório).
 2. Rode `scripts/start-pipeline.ps1 -Plan <plan.json>`. Ele abre `pipeline.ps1` num processo oculto e destacado, que continua rodando mesmo se a sessão do Claude terminar.
 3. O pipeline agenda tudo sozinho:
-   - dispara as tarefas cujas dependências terminaram, até `min(maxConcurrent, recommendedConcurrent)` (ele lê a cota com `quota.ps1` a cada 10 min) e com 60 s de intervalo entre os disparos;
+   - dispara as tarefas cujas dependências terminaram, até `min(maxConcurrent, recommendedConcurrent)` (lê a cota com `quota.ps1` a cada 10 min) e com 60 s de intervalo entre os disparos; com cota de Gemini folgada, o planejador define `maxConcurrent` pelo número de escritores independentes (até 6) e o pipeline sobe a concorrência das tarefas independentes prontas em cadeias Gemini sem ficar preso no padrão 2;
    - cria a worktree de cada escritor no momento do disparo, a partir do HEAD atual, e a remove depois da integração;
-   - roda as tarefas `main` uma por vez e as verifica: comandos em `verify`, árvore limpa e push feito; se a verificação falhar, manda uma tentativa de correção para `fixChain`;
-   - se uma tarefa falhar, para de disparar novas e chama um **coordenador Gemini** (`coordinatorChain`), que lê os logs, corrige a causa e devolve; depois o pipeline repete a tarefa (até `maxRecoveries` vezes);
+   - roda as tarefas `main`/integradoras uma por vez e as verifica: comandos em `verify`, árvore limpa (o `Verify` do `pipeline.ps1` ignora arquivos que já estavam sujos antes da tarefa por outras sessões) e push feito; se a verificação falhar, manda uma tentativa de correção para `fixChain`. Tarefas `main`/integradoras não recebem reserva gratuita e, sem cota nos modelos pagos, aguardam a cota renovar (exceto no modo `desespero`);
+   - se uma tarefa falhar, para de disparar novas e chama o coordenador (`coordinatorChain`), que lê os logs, corrige a causa e devolve; depois o pipeline repete a tarefa (até `maxRecoveries` vezes). Tanto `fixChain` quanto `coordinatorChain` aproveitam na frente os modelos das cadeias editadas por tarefa (`cadeias` em `/ajustes`);
    - sem cota em nenhum provedor, espera 15 min e tenta de novo.
 4. Ao final grava `<logDir>\summary.md`, mostra um aviso na tela do Windows (`msg`) e sai com 0 (concluído) ou 1 (incompleto). Para continuar um pipeline interrompido: `start-pipeline.ps1 -Plan <plan.json> -Resume`.
 5. Se a sessão ainda estiver aberta, acompanhe com Monitor (`until grep -q "pipeline end" <logDir>/pipeline.log`) e confira o resultado como na seção abaixo antes de avisar o usuário.
@@ -224,19 +237,39 @@ Antes de cada rodada, leia `scripts/quota.ps1` (leva cerca de 30 s: o agy respon
   - Gemini (`agy:gemini-*`): janelas de 5 h e semanal;
   - Gemini 4 Argon (`agy:*argon*`): semanal;
   - Claude e GPT via Antigravity (`agy:claude-*` e `agy:gpt-*`): janelas de 5 h e semanal.
-- O agy informa o que **resta**. O script guarda o que foi **usado** (de 0 a 1) nos campos `fiveHour` e `sevenDay` e acrescenta `fiveHourRemaining` e `sevenDayRemaining`. Gemini com 2% ou menos restante na janela de 5 h ou na semanal fica com 0 trabalhadores.
-- **Se a leitura falhar:** valem, nessa ordem, a última leitura boa (até 6 h), o arquivo manual `%USERPROFILE%\.delegar\state\gemini.json` (`usedPercent`, `resetsAt`, `updated`) e o registro de estouros `quota-ledger.jsonl` (o `worker.ps1` grava ali cada estouro; estouro há menos de 5 h vale 0, vá direto para Sonnet/Haiku). Sem nenhum deles, o Gemini vale 1 trabalhador.
+- O agy informa o que **resta**. O script guarda o que foi **usado** (de 0 a 1) nos campos `fiveHour` e `sevenDay` e acrescenta `fiveHourRemaining` e `sevenDayRemaining`. Gemini com 2% ou menos restante na janela de 5 h ou na semanal fica com 0 trabalhadores. Com cota de Gemini folgada (`gemini.maxParallel = 6` com menos de 50% usado ou janela de 5 h renovando em menos de 1 h), `quota.ps1` recomenda até 6 simultâneos.
+- **Se a leitura falhar:** valem, nessa ordem, a última leitura boa (até 6 h), o arquivo manual `%USERPROFILE%\.delegar\state\gemini.json` (`usedPercent`, `resetsAt`, `updated`) e o registro de estouros `quota-ledger.jsonl` (o `worker.ps1` e o `quota.ps1` separam estouros do ledger por grupo: `gemini`, `argon`, `agyClaudeGpt`, e pulam `agy:claude-*` e `agy:gpt-*` quando `agyClaudeGpt` está esgotado; estouro há menos de 5 h vale 0). Sem nenhum deles, o Gemini vale 1 trabalhador.
 - **Cache:** `quota-last.json` guarda a última leitura. Com `-MaxAgeMinutes`, o script reaproveita essa leitura se ela for mais nova que o limite, sem chamar o agy. A pasta de estado é `%USERPROFILE%\.delegar\state`, ou a de `DELEGAR_DATA` quando a variável existe.
 - **Testes:** `-SkipAgy` pula a leitura do agy; `-AgyUsageFile <arquivo>` lê uma saída guardada.
 - **Claude direto (`claude:`):** leitura real da janela de 5 h e da semanal (`utilization`, `resetsAt`).
 - **Painel e API:** `GET /api/cotas` responde com o cache de até 10 min; se ele estiver mais velho, a leitura roda em segundo plano e a resposta sai na hora com `lendo=true`. `POST /api/cotas/atualizar` força uma leitura, uma por vez, com intervalo mínimo de 30 s. `GET /api/projetos/<id>/cotas` traz só os grupos usados nas cadeias do projeto. Todas exigem o token.
-- `recommendedConcurrent` soma as duas recomendações (máximo 3). O segundo trabalhador é seguro mesmo com a cota do Gemini incerta quando o Claude tem folga, porque a cadeia de reserva cai no Sonnet.
+- `recommendedConcurrent` soma as recomendações dos provedores (5 ou 6 com o Gemini folgado, visto em 16/11/2026). O segundo trabalhador é seguro mesmo com a cota do Gemini incerta quando o Claude tem folga, porque a cadeia de reserva cai no Sonnet.
 
-Acelere (2 simultâneos, raramente 3) quando a cota estiver quase cheia ou quando sobrar bastante e a janela estiver perto de renovar (cota que seria perdida). Reduza para 1 quando qualquer provedor passar de ~80% usado. Se todos estiverem acima de 90% usado, pare e avise o usuário com os horários de renovação.
+### Histórico de cotas e estimativa de tokens por 1%
+
+- **Histórico (`state/quota-historico.jsonl`):** cada leitura bem-sucedida de cotas (feita pelo `quota.ps1` ou pelo servidor) grava uma linha JSON compacta no histórico em `%USERPROFILE%\.delegar\state\quota-historico.jsonl`. O arquivo deduplica entradas consecutivas de mesmo horário e é rotacionado atomicamente se passar de 2 MB (mantendo as 1000 linhas mais recentes).
+- **Estimativa de tokens por 1%:** calcula a relação entre tokens consumidos e variação percentual de cota (`1% ≈ X mil tokens de entrada / Y mil de saída`):
+  - Compara pares consecutivos de leituras `(A, B)` sem renovação no meio (`B.restante <= A.restante`), com duração máxima de 5,5 h para janelas de 5 h e 7,5 d para janelas semanais.
+  - Variações menores que 1% são descartadas para evitar ruído de arredondamento.
+  - Conta todo o consumo local no intervalo: tarefas registradas no Delegar, transcrições do Claude Code (`.claude/projects/**/*.jsonl`, com deduplicação de `message.id`) e logs locais do Antigravity brain (`~/.gemini/antigravity-cli/brain/**/transcript_full.jsonl`).
+  - Descarta anomalias (quedas bruscas de cota sem tokens locais correspondentes) e aplica filtro de mediana contra outliers.
+  - Janelas que zeraram (restante ≤ 2%) ou que começaram cheias (≥ 95%) recebem peso maior na agregação ponderada.
+  - **Relação 5 h → semanal:** relaciona as quedas simultâneas da janela de 5 h e da semanal para estimar quanto uma janela de 5 h cheia consome da semanal total.
+  - **Por modelo:** Haiku, Sonnet, Opus e Gemini Flash/Argon têm consumos relativos estimados a partir de amostras dedicadas e da hipótese de equivalência de custo pela tabela de preços (`precos.mjs`).
+  - **Aviso:** a estimativa baseia-se no consumo local capturado na máquina; o uso externo fora do Delegar (Claude Code interativo em outro diretório, IDE do Antigravity sem transcript ou sessões em outro PC) distorce a conta.
+
+**Preferência do usuário (16/11/2026):** com cota sobrando, suba os workers (principalmente Gemini) para terminar rápido o que pode correr em paralelo: no plano, `maxConcurrent` igual ao número de escritores independentes (até 6); não segure em 2. Acelere também quando a janela estiver perto de renovar (cota que seria perdida).
+
+**Integração sem Claude e vigia de 20 min (17/11/2026):** a integração com reserva gratuita (GLM do opencode) travou por 2,5 h sem saída em 16/11/2026, quando o Claude direto e o do Antigravity estavam sem cota. Por isso, tarefas `main`/integradoras não recebem reserva gratuita e, sem cota nos modelos pagos, aguardam a cota renovar (exceto no modo `desespero`). Além disso, o `worker.ps1` monitora todas as CLIs com um vigia (`-IdleTimeoutMinutes 20`) que encerra tentativas sem saída nem evento por 20 min, registra o evento `vigia` em `events.jsonl` e passa ao próximo modelo. Reduza para 1 quando qualquer provedor passar de ~80% usado. Se todos estiverem acima de 90% usado, pare e avise o usuário com os horários de renovação.
 
 ## Tokens e custo
 
 O Delegar registra o consumo de tokens e calcula o custo financeiro aproximado de cada execução.
+
+- **Filtros de uso:**
+  - Período pré-definido: `hoje`, `7d`, `30d` (padrão) e `tudo`.
+  - Mês específico: `--mes AAAA-MM` na CLI ou `/api/uso?mes=AAAA-MM` na API e painel.
+  - Intervalo de datas: `--de AAAA-MM-DD --ate AAAA-MM-DD` na CLI ou `/api/uso?de=...&ate=...` na API.
 
 - **Contagem por CLI:**
   - Claude: extraído do evento final `result` do stream-json (`usage`, `modelUsage` e `total_cost_usd`).

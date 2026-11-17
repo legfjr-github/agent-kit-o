@@ -278,7 +278,7 @@ foreach ($k in $gem.Keys) { $gemini[$k] = $gem[$k] }
 $gemini.lastQuotaHit = $null; $gemini.usedPercent = $null; $gemini.resetsAt = $null; $gemini.maxParallel = 1
 $ledger = Join-Path $state 'quota-ledger.jsonl'
 if (Test-Path $ledger) {
-  $hit = Get-Content $ledger -Encoding UTF8 | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.worker -like 'agy:*' } | Select-Object -Last 1
+  $hit = Get-Content $ledger -Encoding UTF8 | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.worker -like 'agy:*' -and $_.worker -notmatch '^agy:(claude|gpt)' -and $_.worker -notmatch 'argon' } | Select-Object -Last 1
   if ($hit) {
     $gemini.lastQuotaHit = $hit.time
     $age = ($now - [datetime]$hit.time).TotalHours
@@ -305,13 +305,17 @@ if ($gemini.read) {
   $hrs5 = if ($gemini.fiveHourResets) { ([datetime]$gemini.fiveHourResets - $now).TotalHours } else { 999 }
   # Plenty of quota left allows several agents at once (independent batches finish sooner).
   if ($gemini.exhausted) { $gemini.maxParallel = 0 }
-  elseif ($maxUsed -lt 0.5 -or ($hrs5 -lt 1 -and $maxUsed -lt 0.8)) { $gemini.maxParallel = 5 }
+  elseif ($maxUsed -lt 0.5 -or ($hrs5 -lt 1 -and $maxUsed -lt 0.8)) { $gemini.maxParallel = 6 }
   elseif ($maxUsed -lt 0.75 -or ($hrs5 -lt 2 -and $maxUsed -lt 0.9)) { $gemini.maxParallel = 3 }
   else { $gemini.maxParallel = 1 }
 }
 if (-not $hasAgy) { $gemini.source = 'not installed'; $gemini.maxParallel = 0 }
 
-$total = [Math]::Min(6, $gemini.maxParallel + $claude.maxParallel)
+$acgBonus = 0
+if ((-not $acg.exhausted) -and ($acg.read -or $null -ne $acg.fiveHourRemaining -or $null -ne $acg.sevenDayRemaining) -and ($null -eq $acg.fiveHourRemaining -or $acg.fiveHourRemaining -gt 0.2) -and ($null -eq $acg.sevenDayRemaining -or $acg.sevenDayRemaining -gt 0.2)) {
+  $acgBonus = 1
+}
+$total = [Math]::Min(6, $gemini.maxParallel + $claude.maxParallel + $acgBonus)
 # PC with only the free models (opencode): they are the normal chain there, not a "desperate" fallback.
 if (-not $hasClaude -and -not $hasAgy -and $hasOpencode) { $total = 2 }
 $leitura = [pscustomobject]@{
@@ -326,6 +330,29 @@ try {
   Move-Item -Force -LiteralPath $tmp -Destination $cache
 } catch {
   if (Test-Path $tmp) { Remove-Item -Force -LiteralPath $tmp -ErrorAction SilentlyContinue }
+}
+if ($claude.read -or $agyInfo.read) {
+  $histPath = Join-Path $state 'quota-historico.jsonl'
+  $histEntry = [ordered]@{ time = $leitura.time; claude = $claude; gemini = $gemini; argon = $argon; agyClaudeGpt = $acg }
+  $histLine = ($histEntry | ConvertTo-Json -Depth 4 -Compress) + "`n"
+  $utf8 = New-Object Text.UTF8Encoding $false
+  try {
+    [IO.File]::AppendAllText($histPath, $histLine, $utf8)
+    $fi = New-Object IO.FileInfo($histPath)
+    if ($fi.Exists -and $fi.Length -gt 2097152) {
+      $allLines = [IO.File]::ReadAllLines($histPath, $utf8)
+      if ($allLines.Length -gt 1000) {
+        $lastLines = $allLines[($allLines.Length - 1000)..($allLines.Length - 1)]
+        $histTmp = $histPath + '.' + $PID + '.tmp'
+        [IO.File]::WriteAllLines($histTmp, $lastLines, $utf8)
+        Move-Item -Force -LiteralPath $histTmp -Destination $histPath
+      }
+    }
+  } catch {
+    if (Test-Path ($histPath + '.' + $PID + '.tmp')) {
+      Remove-Item -Force -LiteralPath ($histPath + '.' + $PID + '.tmp') -ErrorAction SilentlyContinue
+    }
+  }
 }
 $json
 Write-Output ('recommendedConcurrent=' + $total)

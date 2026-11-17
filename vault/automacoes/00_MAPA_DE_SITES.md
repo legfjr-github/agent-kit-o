@@ -5,5 +5,6 @@
 | Site | Mapa | Login | Fluxos mapeados | Projetos |
 |---|---|---|---|---|
 | sso.acesso.gov.br (gov.br) | [[automacoes/sites/sso.acesso.gov.br]] | gov.br (pessoa faz o login) | login com perfil persistente | - |
+| tecconcursos.com.br | [[automacoes/sites/tecconcursos.com.br]] | formulário próprio (`/login`, pessoa faz o login) | pastas, filtros, contagem, geração de cadernos, guias por edital, impressão em PDF e extração pela API | `tec-concursos` |
 
 <!-- o install.py --mapear acrescenta aqui os domínios achados no código de projetos com automação -->

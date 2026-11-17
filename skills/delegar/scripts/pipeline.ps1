@@ -12,13 +12,20 @@
 #   instead of waiting; it turns off when quota comes back.
 # - State in <logDir>\status.json (use -Resume to continue), events in events.jsonl, summary in summary.md.
 # ASCII only (PowerShell 5.1).
-param([Parameter(Mandatory=$true)][string]$Plan, [switch]$Resume)
+param(
+  [Parameter(Mandatory=$true)][string]$Plan,
+  [switch]$Resume,
+  [int]$QuotaWaitSeconds = 900,
+  [int]$LaunchStaggerSeconds = 60,
+  [int]$LoopSleepSeconds = 30
+)
 
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $utf8 = New-Object Text.UTF8Encoding $false
 $planDir = Split-Path (Resolve-Path $Plan)
 $p = Get-Content $Plan -Raw -Encoding UTF8 | ConvertFrom-Json
+$modoDesespero = ($p.mode -eq 'desespero')
 $repo = $p.repo
 $logRoot = if ($p.logDir) { $p.logDir } else { Join-Path $planDir 'logs' }
 $wtRoot = if ($p.worktreeRoot) { $p.worktreeRoot } else { "$repo-wt" }
@@ -108,14 +115,50 @@ function PromptFor($t, $wt) {
   return $out
 }
 
-function StartWorker($id, $promptFile, $cwd, $ch) {
+function EhGratuito($entry) {
+  if ($entry -like 'opencode:*' -and ($entry -match '-free(@|$)' -or $entry -match 'big-pickle(@|$)')) {
+    return $true
+  }
+  return $false
+}
+
+function StartWorker($id, $promptFile, $cwd, $ch, [switch]$NoFreeFallback) {
   $ld = Join-Path $logRoot $id
   $q = { param($s) '"' + $s + '"' }
-  $argList = "-NoProfile -ExecutionPolicy Bypass -File $(& $q (Join-Path $skill 'worker.ps1')) -PromptFile $(& $q $promptFile) -Cwd $(& $q $cwd) -LogDir $(& $q $ld) -Chain $(& $q ($ch -join ','))"
+  $noFree = if ($NoFreeFallback) { '-NoFreeFallback' } else { '' }
+  $argList = "-NoProfile -ExecutionPolicy Bypass -File $(& $q (Join-Path $skill 'worker.ps1')) -PromptFile $(& $q $promptFile) -Cwd $(& $q $cwd) -LogDir $(& $q $ld) -Chain $(& $q ($ch -join ',')) $noFree"
   return Start-Process powershell -ArgumentList $argList -WindowStyle Hidden -PassThru
 }
 
-function Verify {
+function FileInfoFromPorcelain($repoPath, [string]$line) {
+  if ($line.Length -lt 4) { return $null }
+  $rel = $line.Substring(3).Trim()
+  if ($rel -match '->\s*(.+)$') { $rel = $Matches[1].Trim() }
+  $rel = $rel.Trim('"')
+  $full = Join-Path $repoPath $rel
+  if (Test-Path -LiteralPath $full) {
+    try {
+      $fi = New-Object IO.FileInfo($full)
+      return @{ len = $fi.Length; time = $fi.LastWriteTimeUtc.Ticks }
+    } catch {}
+  }
+  return @{ len = -1; time = 0 }
+}
+
+function DirtySnapshot {
+  $snap = @{}
+  Push-Location $repo
+  $lines = @(git status --porcelain 2>$null)
+  Pop-Location
+  foreach ($l in $lines) {
+    if (-not [string]::IsNullOrWhiteSpace($l)) {
+      $snap[$l] = (FileInfoFromPorcelain $repo $l)
+    }
+  }
+  return $snap
+}
+
+function Verify($preDirty = $null) {
   $msgs = @()
   Push-Location $repo
   foreach ($c in @($p.verify)) {
@@ -123,9 +166,25 @@ function Verify {
     $o = cmd /c "$c 2>&1" | Out-String
     if ($LASTEXITCODE -ne 0) { $msgs += "FALHOU: $c`n$o" }
   }
-  $dirty = git status --porcelain | Out-String
-  if ($dirty.Trim()) { $msgs += "Arvore suja (git status --porcelain):`n$dirty" }
-  $sb = git status -sb | Select-Object -First 1
+  $rawLines = @(git status --porcelain 2>$null)
+  $dirtyLines = @()
+  foreach ($l in $rawLines) {
+    if ([string]::IsNullOrWhiteSpace($l)) { continue }
+    $firstChar = if ($l.Length -gt 0) { $l[0] } else { ' ' }
+    $isNotStaged = ($firstChar -eq ' ' -or $firstChar -eq '?')
+    if ($preDirty -and $isNotStaged -and $preDirty.ContainsKey($l)) {
+      $oldInfo = $preDirty[$l]
+      $currInfo = FileInfoFromPorcelain $repo $l
+      if ($currInfo.len -eq $oldInfo.len -and $currInfo.time -eq $oldInfo.time) {
+        continue
+      }
+    }
+    $dirtyLines += $l
+  }
+  if ($dirtyLines.Count -gt 0) {
+    $msgs += "Arvore suja (git status --porcelain):`n$($dirtyLines -join "`n")"
+  }
+  $sb = git status -sb 2>$null | Select-Object -First 1
   if ($sb -match 'ahead') { $msgs += "Commits sem push: $sb" }
   Pop-Location
   return ($msgs -join "`n`n")
@@ -167,8 +226,24 @@ while ($true) {
     $s.model = if ($res) { $res.model } else { $null }
     $ok = $res -and $res.ok
     $t = $p.tasks | Where-Object { $_.id -eq $id }
+
+    # Quota exhaustion check: integration and tasks wait for paid quota renewal instead of failing
+    $quotaAcabou = (-not $ok) -and $res -and ($res.quotaExhausted -or ($res.attempts -and $res.attempts.Count -gt 0 -and @($res.attempts | Where-Object { -not $_.quota }).Count -eq 0))
+    if ($quotaAcabou) {
+      $st[$id].state = 'pending'
+      $st[$id].note = 'sem cota nos modelos pagos; aguardando renovacao'
+      Save
+      Log "$id sem cota nos modelos pagos; aguardando $QuotaWaitSeconds s"
+      Ev 'cota' $id $null 'sem cota nos modelos pagos; aguardando a cota renovar'
+      if ($running.Count -eq 0) {
+        Start-Sleep $QuotaWaitSeconds
+        $script:quotaAt = [datetime]::MinValue
+      }
+      continue
+    }
+
     if ($ok -and $r.main) {
-      $v = Verify
+      $v = Verify $r.preDirty
       if ($v) {
         if (-not $r.fix) {
           Log "$id verify failed, launching fix"
@@ -177,8 +252,19 @@ while ($true) {
           $orig = Get-Content $r.promptFile -Raw -Encoding UTF8
           $fx = "A tarefa abaixo foi executada, mas a verificacao automatica falhou. Corrija o problema no repositorio $repo e conclua o fechamento que a tarefa original pedir (commit, push, deploy, cofre, conforme o caso). Nao refaca o trabalho que ja esta pronto. Nao grave no cofre nada alem do que a tarefa original pedir.`n`n## Falhas`n$v`n`n## Tarefa original`n$orig"
           [IO.File]::WriteAllText($fp, $fx, $utf8)
-          $fc = if ($script:desperate -and $despChain.Count) { $despChain } else { $fixChain }
-          $running[$id] = @{ proc = (StartWorker "$id-fix" $fp $repo $fc); main = $true; fix = $true; promptFile = $r.promptFile }
+
+          $baseFix = if ($script:desperate -and $despChain.Count -and ($modoDesespero -or (@($fixChain | Where-Object { -not (EhGratuito $_) }).Count -eq 0))) { $despChain } else { $fixChain }
+          $fc = @()
+          if ($t.chain) {
+            foreach ($m in @($t.chain)) {
+              if (-not (EhGratuito $m) -and $m -notin $fc) { $fc += $m }
+            }
+          }
+          foreach ($m in $baseFix) {
+            if ($m -notin $fc) { $fc += $m }
+          }
+
+          $running[$id] = @{ proc = (StartWorker "$id-fix" $fp $repo $fc -NoFreeFallback:(-not $modoDesespero)); main = $true; fix = $true; promptFile = $r.promptFile; preDirty = $r.preDirty }
           $s.note = 'fixing'; Save; continue
         }
         $ok = $false; $s.note = "verify failed after fix: $($v.Substring(0, [Math]::Min(500, $v.Length)))"
@@ -219,8 +305,8 @@ while ($true) {
     if ((Supervision) -ne 'automatico') {
       $g = "recuperacao-$next"
       $gs = GateState $g
-      if ($gs -eq 'none') { AskGate $g $null "falharam: $($failedIds -join ', '). Chamar o coordenador para corrigir e repetir?"; Start-Sleep 30; continue }
-      if ($gs -eq 'pending') { Start-Sleep 30; continue }
+      if ($gs -eq 'none') { AskGate $g $null "falharam: $($failedIds -join ', '). Chamar o coordenador para corrigir e repetir?"; Start-Sleep $LoopSleepSeconds; continue }
+      if ($gs -eq 'pending') { Start-Sleep $LoopSleepSeconds; continue }
       if ($gs -eq 'no') { Log "recovery refused by user"; Ev 'pipeline' $null $null 'recuperacao recusada pelo usuario'; break }
     }
     $script:recoveries = $next
@@ -230,8 +316,22 @@ while ($true) {
     $ctx = ($failedIds | ForEach-Object { "- $_ : nota=$($st[$_].note); logs em $(Join-Path $logRoot $_) e $(Join-Path $logRoot ($_ + '-fix')); prompt em $(Join-Path $logRoot ($_ + '.prompt.md'))" }) -join "`n"
     $txt = "Voce e o COORDENADOR do pipeline '$($p.name)' (plano: $Plan, estado: $statusFile, log: $logFile). Repositorio: $repo.`nAs tarefas abaixo falharam:`n$ctx`n`nLeia os logs e descubra a causa. Corrija o que impede a tarefa de concluir (no repositorio, nas worktrees em $wtRoot ou no arquivo de prompt da tarefa em $planDir), sem refazer trabalho pronto e sem apagar arquivos de outras tarefas. Se a tarefa ja estiver de fato concluida (commit, push, deploy), apenas confirme. Nao rode o pipeline: ele mesmo vai reler o plano e repetir as tarefas quando voce terminar. Nao grave nada no cofre de conhecimento. Termine com um resumo curto da causa e da correcao."
     [IO.File]::WriteAllText($cp, $txt, $utf8)
-    $cc = if ($script:desperate -and $despChain.Count) { $despChain } else { $coordChain }
-    $proc = StartWorker "recovery$($script:recoveries)" $cp $repo $cc
+
+    $baseCoord = if ($script:desperate -and $despChain.Count -and ($modoDesespero -or (@($coordChain | Where-Object { -not (EhGratuito $_) }).Count -eq 0))) { $despChain } else { $coordChain }
+    $cc = @()
+    foreach ($fid in $failedIds) {
+      $failedTask = @($p.tasks | Where-Object { $_.id -eq $fid }) | Select-Object -First 1
+      if ($failedTask -and $failedTask.chain) {
+        foreach ($m in @($failedTask.chain)) {
+          if (-not (EhGratuito $m) -and $m -notin $cc) { $cc += $m }
+        }
+      }
+    }
+    foreach ($m in $baseCoord) {
+      if ($m -notin $cc) { $cc += $m }
+    }
+
+    $proc = StartWorker "recovery$($script:recoveries)" $cp $repo $cc -NoFreeFallback:(-not $modoDesespero)
     $proc.WaitForExit()
     try { $p = Get-Content $Plan -Raw -Encoding UTF8 | ConvertFrom-Json; Log 'plan reloaded' } catch { Log "plan reload failed: $_" }
     foreach ($id in $failedIds) { $st[$id].state = 'pending'; $st[$id].note = "retry after recovery $($script:recoveries)" }
@@ -242,22 +342,49 @@ while ($true) {
     $qn = QuotaN
     if ($qn -gt 0 -and $script:desperate) { $script:desperate = $false; Log 'desperate mode OFF (quota is back)'; Ev 'desespero' $null $null 'cota voltou; saindo do modo desespero' }
     if ($qn -eq 0 -and -not $script:desperate -and $running.Count -eq 0) {
-      if ($despChain.Count -eq 0) { Log 'no quota on any provider; waiting 15 min'; Start-Sleep 900; $script:quotaAt = [datetime]::MinValue; continue }
+      $prontas = @($pending | Where-Object {
+        $tItem = $_
+        $depsOk = $true
+        foreach ($d in @($tItem.after)) { if ($d -and $st[$d].state -ne 'done') { $depsOk = $false } }
+        return $depsOk
+      })
+      if ($prontas.Count -gt 0 -and (-not $modoDesespero) -and (@($prontas | Where-Object { -not $_.main }).Count -eq 0)) {
+        Log "todas as tarefas prontas sao main; aguardando cota paga renovar por $QuotaWaitSeconds s"
+        Ev 'cota' $null $null 'integracao aguarda renovacao de cota nos modelos pagos'
+        Start-Sleep $QuotaWaitSeconds
+        $script:quotaAt = [datetime]::MinValue
+        continue
+      }
+      if ($despChain.Count -eq 0) { Log "no quota on any provider; waiting $QuotaWaitSeconds s"; Start-Sleep $QuotaWaitSeconds; $script:quotaAt = [datetime]::MinValue; continue }
       $go = $true
       if ((Supervision) -ne 'automatico') {
         $g = "desespero-$($script:despAsk)"
         $gs = GateState $g
         if ($gs -eq 'none') { AskGate $g $null 'sem cota no Claude e no Gemini. Continuar com os modelos gratuitos (modo desespero)?'; $go = $false }
         elseif ($gs -eq 'pending') { $go = $false }
-        elseif ($gs -eq 'no') { Log 'desperate mode refused; waiting 15 min'; $script:despAsk++; Start-Sleep 900; $script:quotaAt = [datetime]::MinValue; continue }
+        elseif ($gs -eq 'no') { Log "desperate mode refused; waiting $QuotaWaitSeconds s"; $script:despAsk++; Start-Sleep $QuotaWaitSeconds; $script:quotaAt = [datetime]::MinValue; continue }
       }
-      if (-not $go) { Start-Sleep 30; continue }
+      if (-not $go) { Start-Sleep $LoopSleepSeconds; continue }
       $script:desperate = $true
       Log "desperate mode ON: $($despChain -join ' > ')"
       Ev 'desespero' $null ($despChain -join ' > ') 'sem cota no Claude e no Gemini; usando os modelos gratuitos'
       Notify 'sem cota no Claude e no Gemini; seguindo com os modelos gratuitos (modo desespero).'
     }
+
     $limit = if ($script:desperate) { [Math]::Min($maxConc, 2) } else { [Math]::Min($maxConc, $qn) }
+    if (-not $script:desperate) {
+      $prontasParalelas = @($pending | Where-Object {
+        $tItem = $_
+        if (-not $tItem.worktree -or $tItem.main) { return $false }
+        $depsOk = $true
+        foreach ($d in @($tItem.after)) { if ($d -and $st[$d].state -ne 'done') { $depsOk = $false } }
+        return $depsOk
+      }).Count
+      if ($qn -ge 5 -and $prontasParalelas -gt $maxConc) {
+        $limit = [Math]::Min(6, [Math]::Min($qn, [Math]::Max($maxConc, $prontasParalelas)))
+      }
+    }
+
     $mainBusy = @($running.Values | Where-Object { $_.main }).Count -gt 0
     foreach ($t in $pending) {
       if ($running.Count -ge $limit) { break }
@@ -282,16 +409,21 @@ while ($true) {
         $cwd = $wt
       }
       $pf = PromptFor $t $wt
-      $ch = if ($script:desperate -and $despChain.Count) { $despChain } elseif ($t.chain) { @($t.chain) } else { $chain }
-      $running[$t.id] = @{ proc = (StartWorker $t.id $pf $cwd $ch); main = [bool]$t.main; fix = $false; promptFile = $pf }
+      $taskChain = if ($t.chain) { @($t.chain) } else { $chain }
+      $onlyFree = (@($taskChain | Where-Object { -not (EhGratuito $_) }).Count -eq 0)
+      $ch = if ($script:desperate -and $despChain.Count -and ($modoDesespero -or -not $t.main -or $onlyFree)) { $despChain } else { $taskChain }
+      $isMain = [bool]$t.main
+      $snap = if ($isMain) { DirtySnapshot } else { $null }
+      $useNoFree = $isMain -and (-not $modoDesespero)
+      $running[$t.id] = @{ proc = (StartWorker $t.id $pf $cwd $ch -NoFreeFallback:$useNoFree); main = $isMain; fix = $false; promptFile = $pf; preDirty = $snap }
       $st[$t.id].state = 'running'; $st[$t.id].started = (Get-Date).ToString('s'); $st[$t.id].note = $null; Save
       Log "$($t.id) started in $cwd"
       Ev 'inicio' $t.id ($ch -join ' > ') "tarefa iniciada em $cwd"
       if ($t.main) { $mainBusy = $true }
-      Start-Sleep 60   # stagger launches
+      Start-Sleep $LaunchStaggerSeconds
     }
   }
-  Start-Sleep 30
+  Start-Sleep $LoopSleepSeconds
 }
 
 # ---- summary ----

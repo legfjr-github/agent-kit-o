@@ -10,17 +10,40 @@
 <link rel="stylesheet" href="/fluxo.css">
 </head>
 <body>
-<header class="top">
-  <h1>Delegar</h1>
-  <span class="sub">planejar com um modelo, executar com vários agentes</span>
-  <span id="provs" class="provs"></span>
-  <button id="btnAtividade">Atividade <span id="ativBadge" class="contador hidden"></span></button>
-  <button id="btnCotas">Cotas</button>
-  <button id="btnNovo" class="primary">Novo projeto</button>
-</header>
-<div class="layout">
-  <aside id="lista" class="lista"></aside>
-  <main id="main">
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div>
+        <div class="brand-title">Delegar</div>
+        <div class="brand-sub">Orquestrador de agentes</div>
+      </div>
+    </div>
+    <nav class="nav" id="nav">
+      <button id="btnNovo" class="nav-btn primary" type="button">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+        <span>Novo projeto</span>
+      </button>
+      <button id="btnAtividade" class="nav-btn" type="button">
+        <svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        <span>Atividade</span>
+        <span id="ativBadge" class="contador hidden"></span>
+      </button>
+      <button id="btnCotas" class="nav-btn" type="button">
+        <svg viewBox="0 0 24 24"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>
+        <span>Cotas e custos</span>
+      </button>
+    </nav>
+    <div class="side-section side-projetos">
+      <div class="side-label">Projetos</div>
+      <div id="lista" class="lista"></div>
+    </div>
+    <div class="side-foot">
+      <div class="side-label">Provedores neste PC</div>
+      <div id="provs" class="provs"></div>
+    </div>
+  </aside>
+  <main id="main" class="main">
     <section id="vazio" class="card vazio">
       <h2>Nenhum projeto aberto</h2>
       <p>Crie um projeto, descreva o trabalho e converse com o planejador. Quando o plano estiver bom, aprove; ou marque <strong>confiar no orquestrador</strong> para ele planejar e iniciar sozinho.</p>
@@ -55,24 +78,38 @@
     </section>
 
     <section id="cotas" class="hidden">
-      <div class="card"><h2>Cotas</h2><p class="hint">Quanto resta em cada provedor. A leitura do Antigravity e do Claude leva de 20 a 40 s.</p><p id="cotasMsg" class="hint"></p></div>
-      <div id="cotasLista" class="cotas-lista"></div>
-      <section class="card uso-secao">
-        <h3>Uso e custo</h3>
-        <div class="uso-filtro">
-          <label>Período
-            <select id="usoPeriodo">
-              <option value="hoje">Hoje</option>
-              <option value="7d">7 dias</option>
-              <option value="30d" selected>30 dias</option>
-              <option value="tudo">Tudo</option>
-            </select>
-          </label>
-        </div>
-        <div class="uso-rolagem" id="usoTabela"></div>
-        <p class="uso-nota" id="usoNota"></p>
-        <div class="uso-precos" id="usoPrecos"></div>
-      </section>
+      <div class="cotas-layout">
+        <section class="card uso-secao">
+          <h3>Uso e custo</h3>
+          <div class="uso-filtro">
+            <label>Período
+              <select id="usoPeriodo">
+                <option value="hoje">Hoje</option>
+                <option value="7d">7 dias</option>
+                <option value="30d" selected>30 dias</option>
+                <option value="tudo">Tudo</option>
+                <option value="mes">Mês específico</option>
+                <option value="intervalo">Intervalo de datas</option>
+              </select>
+            </label>
+            <label id="usoMesBox" class="hidden">Mês <input type="month" id="usoMes"></label>
+            <label id="usoDeBox" class="hidden">De <input type="date" id="usoDe"></label>
+            <label id="usoAteBox" class="hidden">Até <input type="date" id="usoAte"></label>
+          </div>
+          <div class="uso-rolagem" id="usoTabela"></div>
+          <p class="uso-nota" id="usoNota"></p>
+          <div class="uso-precos" id="usoPrecos"></div>
+        </section>
+
+        <aside class="card cotas-lateral">
+          <div class="cotas-lateral-head">
+            <h3>Cotas disponíveis</h3>
+            <button type="button" id="btnAtualizarCotas" class="cota-btn">Atualizar</button>
+          </div>
+          <p id="cotasMsg" class="hint"></p>
+          <div id="cotasLista" class="cotas-lista compacta"></div>
+        </aside>
+      </div>
     </section>
 
     <section id="proj" class="hidden">
@@ -103,6 +140,7 @@
         <h3>Tokens e custo do projeto</h3>
         <div id="pUsoTotal"></div>
         <div id="pUsoModelos"></div>
+        <div id="pUsoRodadas"></div>
         <div id="pUsoTarefas"></div>
       </section>
 
@@ -143,6 +181,11 @@
           <p class="hint">Relatório no cofre: <span id="relatorio" class="mono"></span></p>
         </div>
       </div>
+
+      <section id="pRodadasBox" class="card hidden">
+        <h3>Rodadas anteriores</h3>
+        <div id="pRodadas"></div>
+      </section>
     </section>
   </main>
 </div>

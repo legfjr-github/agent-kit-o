@@ -631,6 +631,236 @@ test('POST /api/projetos/:id/ajustes altera velocidade e atualiza cadeiaEfetiva'
   }
 });
 
+const serverSrc = fs.readFileSync(SERVER, 'utf8');
+const corte = (nome) => {
+  const i = serverSrc.indexOf(`function ${nome}(`);
+  assert.ok(i >= 0, `função ${nome} não encontrada`);
+  const k = serverSrc.indexOf('\n}', i);
+  return serverSrc.slice(i, k + 2);
+};
+const { ehLoopback, validarHostEscuta } = new Function(
+  `${corte('ehLoopback')}\n${corte('validarHostEscuta')}\nreturn { ehLoopback, validarHostEscuta };`
+)();
+
+test('ehLoopback: aceita loopback IPv4/IPv6 e recusa outros enderecos e invalidos', () => {
+  assert.equal(ehLoopback('127.0.0.1'), true);
+  assert.equal(ehLoopback('::1'), true);
+  assert.equal(ehLoopback('::ffff:127.0.0.1'), true);
+  assert.equal(ehLoopback(' 127.0.0.1 '), true);
+
+  assert.equal(ehLoopback('192.168.0.10'), false);
+  assert.equal(ehLoopback('::ffff:192.168.0.10'), false);
+  assert.equal(ehLoopback('10.0.0.1'), false);
+  assert.equal(ehLoopback(''), false);
+  assert.equal(ehLoopback(undefined), false);
+  assert.equal(ehLoopback(null), false);
+});
+
+test('validarHostEscuta: aceita padrao e 127.0.0.1; recusa outros hosts em env e argv', () => {
+  assert.deepEqual(validarHostEscuta({}, []), { ok: true, host: '127.0.0.1' });
+  assert.deepEqual(validarHostEscuta({ DELEGAR_HOST: '127.0.0.1' }, []), { ok: true, host: '127.0.0.1' });
+  assert.deepEqual(validarHostEscuta({ HOST: '127.0.0.1' }, []), { ok: true, host: '127.0.0.1' });
+  assert.deepEqual(validarHostEscuta({ BIND_HOST: '127.0.0.1' }, []), { ok: true, host: '127.0.0.1' });
+  assert.deepEqual(validarHostEscuta({}, ['node', 'server.mjs', '--host', '127.0.0.1']), { ok: true, host: '127.0.0.1' });
+  assert.deepEqual(validarHostEscuta({}, ['node', 'server.mjs', '--host=127.0.0.1']), { ok: true, host: '127.0.0.1' });
+
+  assert.equal(validarHostEscuta({ DELEGAR_HOST: '0.0.0.0' }, []).ok, false);
+  assert.equal(validarHostEscuta({ HOST: '192.168.1.5' }, []).ok, false);
+  assert.equal(validarHostEscuta({}, ['node', 'server.mjs', '--host', '0.0.0.0']).ok, false);
+  assert.equal(validarHostEscuta({}, ['node', 'server.mjs', '--host=0.0.0.0']).ok, false);
+  assert.equal(validarHostEscuta({}, ['node', 'server.mjs', '--bind', '0.0.0.0']).ok, false);
+  assert.equal(validarHostEscuta({}, ['node', 'server.mjs', '-H', '0.0.0.0']).ok, false);
+});
+
+test('processo tentando subir com host nao-local encerra com codigo diferente de 0', () => {
+  const p = spawn(process.execPath, [SERVER], {
+    env: { ...process.env, DELEGAR_HOST: '0.0.0.0', DELEGAR_PORT: '8798', DELEGAR_PROVEDORES: 'nenhum' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let errOut = '';
+  p.stderr.on('data', (d) => { errOut += d; });
+  return new Promise((resolve) => {
+    p.on('close', (code) => {
+      assert.notEqual(code, 0, 'deve sair com código diferente de 0');
+      assert.ok(errOut.includes('O painel Delegar só pode escutar em 127.0.0.1'), `mensagem esperada: ${errOut}`);
+      resolve();
+    });
+  });
+});
+
+test('servidor de teste respondendo normal a 127.0.0.1 e requisicao com remoteAddress simulado de fora dando 403 antes do token e do Host', async () => {
+  let simularRemoto = false;
+  let portaTeste = 0;
+  const srv = http.createServer((req, res) => {
+    if (!ehLoopback(req.socket?.remoteAddress)) {
+      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ erro: 'acesso só deste computador' }));
+    }
+    const host = String(req.headers.host || '');
+    if (host !== `127.0.0.1:${portaTeste}` && host !== `localhost:${portaTeste}`) {
+      res.writeHead(421, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ erro: 'host não permitido' }));
+    }
+    if (req.url === '/api/saude') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: true }));
+    }
+    if (req.url === '/') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end('<html>Delegar</html>');
+    }
+    if (req.headers['x-delegar-token'] !== 'token-valido') {
+      res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ erro: 'token inválido' }));
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ rota: req.url }));
+  });
+
+  srv.on('connection', (sock) => {
+    if (simularRemoto) {
+      Object.defineProperty(sock, 'remoteAddress', { value: '192.168.0.10', configurable: true });
+    }
+  });
+
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', () => {
+    portaTeste = srv.address().port;
+    resolve();
+  }));
+
+  try {
+    const disparar = (path, { host = `127.0.0.1:${portaTeste}`, token = null } = {}) => new Promise((resolve, reject) => {
+      const headers = { Host: host };
+      if (token) headers['X-Delegar-Token'] = token;
+      const r = http.request({ host: '127.0.0.1', port: portaTeste, path, headers, agent: false }, (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          const txt = Buffer.concat(chunks).toString('utf8');
+          let json = null;
+          try { json = JSON.parse(txt); } catch {}
+          resolve({ status: res.statusCode, json, txt });
+        });
+      });
+      r.on('error', reject);
+      r.end();
+    });
+
+    // 1. Acesso local normal funciona
+    simularRemoto = false;
+    const rSaudeLocal = await disparar('/api/saude');
+    assert.equal(rSaudeLocal.status, 200);
+    assert.equal(rSaudeLocal.json.ok, true);
+
+    const rRaizLocal = await disparar('/');
+    assert.equal(rRaizLocal.status, 200);
+
+    const rHostInvalidoLocal = await disparar('/api/saude', { host: 'invasor.local' });
+    assert.equal(rHostInvalidoLocal.status, 421);
+
+    // 2. Acesso remoto simulado (192.168.0.10) dá 403 antes do token e do Host
+    simularRemoto = true;
+
+    // Em /api/saude
+    const rSaudeRemota = await disparar('/api/saude');
+    assert.equal(rSaudeRemota.status, 403);
+    assert.deepEqual(rSaudeRemota.json, { erro: 'acesso só deste computador' });
+    assert.ok(!rSaudeRemota.txt.includes('192.168.0.10'), 'não ecoa o IP recebido');
+
+    // Em /
+    const rRaizRemota = await disparar('/');
+    assert.equal(rRaizRemota.status, 403);
+    assert.deepEqual(rRaizRemota.json, { erro: 'acesso só deste computador' });
+
+    // Com Host incorreto: dá 403 (e não 421), provando que checa remoteAddress antes de Host
+    const rHostRemoto = await disparar('/api/saude', { host: 'invasor.local' });
+    assert.equal(rHostRemoto.status, 403);
+    assert.deepEqual(rHostRemoto.json, { erro: 'acesso só deste computador' });
+
+    // Em rota de API sem token e com Host de invasor: dá 403 (e não 401 ou 421)
+    const rApiRemota = await disparar('/api/projetos', { host: 'invasor.local' });
+    assert.equal(rApiRemota.status, 403);
+    assert.deepEqual(rApiRemota.json, { erro: 'acesso só deste computador' });
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+  }
+});
+
+test('POST /api/projetos/:id/ajustes altera cadeias e atualiza cadeiaEfetiva', async () => {
+  const id = '202611170800-teste-cadeias-01';
+  const dir = path.join(DATA, 'projects', id);
+  fs.mkdirSync(dir, { recursive: true });
+  const arq = path.join(dir, 'project.json');
+  const t = new Date().toISOString();
+  const proj = {
+    id,
+    titulo: 'Projeto teste cadeias ajustes',
+    pedido: 'fazer ajuste de cadeia no plano',
+    repo: REPO,
+    modo: 'padrao',
+    velocidade: 'auto',
+    supervisao: 'automatico',
+    criado: t,
+    estado: 'conversando',
+    pid: 0,
+    mensagens: [],
+    sessao: null,
+    plano: {
+      tarefas: [
+        { id: 't1', titulo: 'Escritor', tipo: 'escritor', nivel: 'volume', prompt: 'prompt de teste com tamanho suficiente para escritor', depende: [] },
+        { id: 't2', titulo: 'Integrador', tipo: 'integrador', nivel: 'pesado', prompt: 'prompt de teste com tamanho suficiente para integrador', depende: ['t1'] },
+      ],
+    },
+  };
+  fs.writeFileSync(arq, JSON.stringify(proj, null, 2), 'utf8');
+
+  try {
+    // 1. Cadeias maliciosas ou inválidas recebem 400
+    for (const inv of [
+      'string',
+      123,
+      [],
+      { t1: 'nao-array' },
+      { t1: ['modelo-invalido-sem-provedor'] },
+      { t1: ['claude:sonnet', 'invalido'] },
+      { t1: ['claude:sonnet@invalido'] },
+      { t1: ['-claude:sonnet'] },
+      { t1: ['claude:sonnet/../malicioso'] },
+      { t1: Array(9).fill('claude:sonnet') },
+    ]) {
+      const r = await post(`/api/projetos/${id}/ajustes`, { cadeias: inv });
+      assert.equal(r.status, 400, `recusa cadeia ${JSON.stringify(inv)}`);
+      assert.equal(r.json.erro, 'cadeia inválida');
+    }
+
+    // 2. Cadeia válida atualiza tarefa e cadeiaEfetiva
+    const novaCadeia = ['claude:sonnet@high', 'agy:gemini-3.8-flash-high'];
+    const rValida = await post(`/api/projetos/${id}/ajustes`, { cadeias: { t1: novaCadeia } });
+    assert.equal(rValida.status, 200);
+    const getProj = await get(`/api/projetos/${id}`);
+    assert.equal(getProj.status, 200);
+    const [t1, t2] = getProj.json.plano.tarefas;
+    assert.deepEqual(t1.cadeia, novaCadeia);
+    assert.deepEqual(t1.cadeiaEfetiva.slice(0, 2), novaCadeia);
+
+    // 3. Limpar cadeia passando null ou array vazio
+    const rLimpa = await post(`/api/projetos/${id}/ajustes`, { cadeias: { t1: null } });
+    assert.equal(rLimpa.status, 200);
+    const getProjLimpo = await get(`/api/projetos/${id}`);
+    assert.equal(getProjLimpo.json.plano.tarefas[0].cadeia, undefined);
+
+    // 4. Bloqueia se estiver em execução
+    proj.estado = 'executando';
+    fs.writeFileSync(arq, JSON.stringify(proj, null, 2), 'utf8');
+    const rExec = await post(`/api/projetos/${id}/ajustes`, { cadeias: { t1: novaCadeia } });
+    assert.equal(rExec.status, 409);
+    assert.equal(rExec.json.erro, 'execução em andamento');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('painel segue de pé no fim', async () => {
   assert.equal((await get('/api/saude', { token: null })).status, 200);
   assert.equal(filho.exitCode, null, 'o processo do servidor continua rodando');

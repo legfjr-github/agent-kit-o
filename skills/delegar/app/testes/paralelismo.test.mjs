@@ -26,3 +26,12 @@ test('manual fica no limite do modo', () => {
 test('valor inválido cai no modo', () => {
   for (const v of [undefined, 0, -3, 2.5, 'cinco', null]) assert.equal(paralelismo({ auto: true, plano: { maxConcurrent: v } }, modo), 2);
 });
+
+test('automático com escritores independentes usa a quantidade de escritores até 6 quando maxConcurrent não é informado', () => {
+  const tarefas5 = Array.from({ length: 5 }, (_, idx) => ({ id: `w${idx + 1}`, tipo: 'escritor' }));
+  assert.equal(paralelismo({ auto: true, plano: { tarefas: tarefas5 } }, modo), 5);
+  assert.equal(paralelismo({ auto: false, supervisao: 'automatico', plano: { tarefas: tarefas5 } }, modo), 5);
+
+  const tarefas8 = Array.from({ length: 8 }, (_, idx) => ({ id: `w${idx + 1}`, tipo: 'escritor' }));
+  assert.equal(paralelismo({ auto: true, plano: { tarefas: tarefas8 } }, modo), 6);
+});

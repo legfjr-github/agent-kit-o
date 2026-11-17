@@ -15,6 +15,11 @@ const FIXTURES = path.join(HERE, 'fixtures');
 
 let raiz, DATA, VAULT, REPO, TOKEN, filho, saida = '', PORT, fakeLiteLLM, LITELLM_PORT;
 
+const agoraRef = new Date();
+const hojeStr = agoraRef.toISOString().slice(0, 10);
+const d15Str = '2026-10-29';
+const d45Str = '2026-09-25';
+
 const PROJ_HOJE = '202611131200-proj-hoje-a1b2';
 const PROJ_15D = '202610291200-proj-15d-c3d4';
 const PROJ_45D = '202609251200-proj-45d-e5f6';
@@ -100,9 +105,9 @@ before(async () => {
     modo: 'padrao',
     auto: true,
     supervisao: 'automatico',
-    criado: '2026-11-13T10:00:00.000Z',
+    criado: `${hojeStr}T10:00:00.000Z`,
     estado: 'executando',
-    mensagens: [{ papel: 'usuario', texto: 'Testar agregacao', quando: '2026-11-13T10:00:00.000Z' }],
+    mensagens: [{ papel: 'usuario', texto: 'Testar agregacao', quando: `${hojeStr}T10:00:00.000Z` }],
     sessao: null,
     plano: {
       titulo: 'Plano Hoje',
@@ -114,7 +119,7 @@ before(async () => {
     uso: {
       chamadas: [
         {
-          quando: '2026-11-13T10:05:00',
+          quando: `${hojeStr}T10:05:00`,
           papel: 'planejador',
           modelo: 'claude:sonnet',
           entrada: 1000,
@@ -134,8 +139,8 @@ before(async () => {
 
   // Status de execução do projeto hoje
   fs.writeFileSync(path.join(logsHojeDir, 'status.json'), JSON.stringify({
-    t1: { state: 'done', model: 'claude:sonnet', started: '2026-11-13T10:06:00', finished: '2026-11-13T10:10:00' },
-    t2: { state: 'running', model: 'opencode:opencode/glm-5.3-flash-free', started: '2026-11-13T10:12:00', finished: null }
+    t1: { state: 'done', model: 'claude:sonnet', started: `${hojeStr}T10:06:00`, finished: `${hojeStr}T10:10:00` },
+    t2: { state: 'running', model: 'opencode:opencode/glm-5.3-flash-free', started: `${hojeStr}T10:12:00`, finished: null }
   }, null, 2), 'utf8');
 
   // T1: result.json com tentativa finalizada
@@ -148,8 +153,8 @@ before(async () => {
         exitCode: 0,
         quota: false,
         emptyOutput: false,
-        started: '2026-11-13T10:06:00',
-        finished: '2026-11-13T10:10:00',
+        started: `${hojeStr}T10:06:00`,
+        finished: `${hojeStr}T10:10:00`,
         out: path.join(t1Dir, '1-sonnet.out.log'),
         err: path.join(t1Dir, '1-sonnet.err.log'),
         text: path.join(t1Dir, '1-sonnet.txt'),
@@ -186,7 +191,7 @@ before(async () => {
   fs.writeFileSync(path.join(t2Dir, 'current.json'), JSON.stringify({
     worker: 'opencode:opencode/glm-5.3-flash-free',
     attempt: 1,
-    started: '2026-11-13T10:12:00'
+    started: `${hojeStr}T10:12:00`
   }), 'utf8');
 
   // 3. Projeto de 15 dias atrás (2026-10-29): entra em 30d e tudo, fora de hoje e 7d
@@ -198,14 +203,14 @@ before(async () => {
     titulo: 'Projeto Teste 15d',
     repo: REPO,
     modo: 'padrao',
-    criado: '2026-10-29T10:00:00.000Z',
+    criado: `${d15Str}T10:00:00.000Z`,
     estado: 'concluido',
     mensagens: [],
     plano: { tarefas: [{ id: 't1', titulo: 'T1 15d', prompt: 'P1' }] },
     uso: {
       chamadas: [
         {
-          quando: '2026-10-29T10:02:00',
+          quando: `${d15Str}T10:02:00`,
           papel: 'planejador',
           modelo: 'claude:sonnet',
           entrada: 300,
@@ -221,15 +226,15 @@ before(async () => {
   };
   fs.writeFileSync(path.join(proj15Dir, 'project.json'), JSON.stringify(proj15, null, 2), 'utf8');
   fs.writeFileSync(path.join(logs15Dir, 'status.json'), JSON.stringify({
-    t1: { state: 'done', model: 'claude:sonnet', started: '2026-10-29T10:05:00', finished: '2026-10-29T10:10:00' }
+    t1: { state: 'done', model: 'claude:sonnet', started: `${d15Str}T10:05:00`, finished: `${d15Str}T10:10:00` }
   }), 'utf8');
   fs.writeFileSync(path.join(logs15Dir, 't1', 'result.json'), JSON.stringify({
     ok: true,
     attempts: [
       {
         worker: 'claude:sonnet',
-        started: '2026-10-29T10:05:00',
-        finished: '2026-10-29T10:10:00',
+        started: `${d15Str}T10:05:00`,
+        finished: `${d15Str}T10:10:00`,
         uso: {
           modelo: 'claude:sonnet',
           entrada: 400,
@@ -253,14 +258,14 @@ before(async () => {
     titulo: 'Projeto Teste 45d',
     repo: REPO,
     modo: 'padrao',
-    criado: '2026-09-25T10:00:00.000Z',
+    criado: `${d45Str}T10:00:00.000Z`,
     estado: 'concluido',
     mensagens: [],
     plano: { tarefas: [{ id: 't1', titulo: 'T1 45d', prompt: 'P1' }] },
     uso: {
       chamadas: [
         {
-          quando: '2026-09-25T10:02:00',
+          quando: `${d45Str}T10:02:00`,
           papel: 'planejador',
           modelo: 'claude:sonnet',
           entrada: 50,
@@ -276,15 +281,15 @@ before(async () => {
   };
   fs.writeFileSync(path.join(proj45Dir, 'project.json'), JSON.stringify(proj45, null, 2), 'utf8');
   fs.writeFileSync(path.join(logs45Dir, 'status.json'), JSON.stringify({
-    t1: { state: 'done', model: 'claude:sonnet', started: '2026-09-25T10:05:00', finished: '2026-09-25T10:10:00' }
+    t1: { state: 'done', model: 'claude:sonnet', started: `${d45Str}T10:05:00`, finished: `${d45Str}T10:10:00` }
   }), 'utf8');
   fs.writeFileSync(path.join(logs45Dir, 't1', 'result.json'), JSON.stringify({
     ok: true,
     attempts: [
       {
         worker: 'claude:sonnet',
-        started: '2026-09-25T10:05:00',
-        finished: '2026-09-25T10:10:00',
+        started: `${d45Str}T10:05:00`,
+        finished: `${d45Str}T10:10:00`,
         uso: {
           modelo: 'claude:sonnet',
           entrada: 60,
@@ -504,6 +509,44 @@ test('GET /api/uso: período tudo inclui os 3 projetos com números exatos', asy
   assert.equal(j.total.cacheGravado, 200);
   // 0.0466 + 45d: (0.0005 + 0.0006) = 0.0011 -> 0.0477
   assert.equal(j.total.usd, 0.0477);
+});
+
+test('GET /api/uso: filtro por mês traz projetos específicos do mês', async () => {
+  const r10 = await get('/api/uso?mes=2026-10');
+  assert.equal(r10.status, 200);
+  assert.equal(r10.json.periodo, '2026-10');
+  assert.equal(r10.json.projetos, 1);
+  assert.equal(r10.json.total.entrada, 700);
+
+  const r09 = await get('/api/uso?mes=2026-09');
+  assert.equal(r09.status, 200);
+  assert.equal(r09.json.periodo, '2026-09');
+  assert.equal(r09.json.projetos, 1);
+  assert.equal(r09.json.total.entrada, 110);
+});
+
+test('GET /api/uso: intervalo de e ate traz projetos do período', async () => {
+  const r = await get('/api/uso?de=2026-09-20&ate=2026-10-30');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.periodo, '2026-09-20 a 2026-10-30');
+  assert.equal(r.json.projetos, 2);
+  assert.equal(r.json.total.entrada, 810);
+});
+
+test('GET /api/uso: entradas inválidas devolvem 400 sem refletir o valor enviado', async () => {
+  const invalidos = [
+    ['/api/uso?mes=2026-13', '2026-13'],
+    ['/api/uso?mes=abc', 'abc'],
+    ['/api/uso?de=2026-02-30', '2026-02-30'],
+    ['/api/uso?de=2026-11-10&ate=2026-11-01', '2026-11-10'],
+    ['/api/uso?de=<script>', '<script>']
+  ];
+  for (const [urlPath, inputVal] of invalidos) {
+    const r = await get(urlPath);
+    assert.equal(r.status, 400, `url ${urlPath}`);
+    assert.equal(r.json?.erro, 'período inválido');
+    assert.ok(!r.txt.includes(inputVal), `não deve refletir o valor enviado: ${inputVal}`);
+  }
 });
 
 test('GET /api/precos devolve a tabela de preços e campos obrigatórios', async () => {

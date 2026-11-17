@@ -21,6 +21,8 @@ const VEL_PADRAO = { auto: 'Automático: esforço sugerido pelo planejador por t
 let MODES = {}, SUP = {}, VEL = { ...VEL_PADRAO }, CAT = { modelos: [], provedores: {} }, ULTIMO = null, PADRAO_CUSTOM = null;
 let atual = null, ultimoMsgs = -1, timer = null, vista = 'vazio', projAtual = null;
 const promptsAbertos = new Set();   // prompts de tarefa abertos: a tabela é refeita a cada 4 s e não pode fechá-los
+const rodadasAbertas = new Set();   // rodadas abertas em "Rodadas anteriores"
+const promptsRodadaAbertos = new Set();   // prompts de tarefa abertos dentro de uma rodada
 let novoCfg = null, projCfg = null;
 let PERFIS = null, PERFIS_AVISO = null, novoPerfil = null, msgModelos = '';   // PERFIS = null: a API de perfis não respondeu, a interface de perfis some
 
@@ -42,7 +44,13 @@ function fillModes(sel) {
 }
 function fillSup(sel) { sel.replaceChildren(...Object.keys(SUP).map((k) => el('option', { value: k, text: SUP[k].split(':')[0] }))); }
 function fillVel(sel) { sel.replaceChildren(...Object.keys(VEL).map((k) => el('option', { value: k, text: VEL[k].split(':')[0], title: VEL[k] }))); }
-function show(id) { vista = id; for (const s of ['vazio', 'novo', 'proj', 'atividade', 'cotas']) $(s).classList.toggle('hidden', s !== id); }
+function show(id) {
+  vista = id;
+  for (const s of ['vazio', 'novo', 'proj', 'atividade', 'cotas']) $(s).classList.toggle('hidden', s !== id);
+  $('btnNovo')?.classList.toggle('active', id === 'novo');
+  $('btnAtividade')?.classList.toggle('active', id === 'atividade');
+  $('btnCotas')?.classList.toggle('active', id === 'cotas');
+}
 
 // ---------- editor de modo ----------
 function editor(box, cfg, { editavel = true, onChange } = {}) {
@@ -79,8 +87,8 @@ function editor(box, cfg, { editavel = true, onChange } = {}) {
       }
       box.append(linha);
     }
-    const mc = el('input', { type: 'number', min: 1, max: 4, value: cfg.maxConcurrent || 2, disabled: !editavel, class: 'num' });
-    mc.onchange = () => { cfg.maxConcurrent = Math.max(1, Math.min(4, Number(mc.value) || 2)); mudou(false); };
+    const mc = el('input', { type: 'number', min: 1, max: 6, value: cfg.maxConcurrent || 2, disabled: !editavel, class: 'num' });
+    mc.onchange = () => { cfg.maxConcurrent = Math.max(1, Math.min(6, Number(mc.value) || 2)); mudou(false); };
     box.append(el('label', { class: 'inline' }, 'Agentes ao mesmo tempo (máximo) ', mc));
     if (editavel) {
       const zero = el('button', { text: 'Começar do zero' });
@@ -279,6 +287,72 @@ function renderPlano(p) {
   $('verify').textContent = (p.plano.verify || []).length ? 'Verificação após cada integração: ' + p.plano.verify.join(' · ') : '';
 }
 
+function renderRodadas(p) {
+  const box = $('pRodadasBox');
+  const rodadas = p.rodadas || [];
+  if (!rodadas.length) {
+    box.classList.add('hidden');
+    $('pRodadas').replaceChildren();
+    renderRodadas.chave = null;
+    return;
+  }
+  // só refaz quando os dados das rodadas mudam (rodada e prompt abertos não fecham)
+  const chave = p.id + JSON.stringify(rodadas.map((r) => [r.numero, r.estado, r.titulo || '', r.inicio || '', r.fim || '', r.status || {}, r.uso || {}, r.resumoFinal || '', r.plano?.resumo || '']));
+  if (renderRodadas.chave === chave) return;
+  renderRodadas.chave = chave;
+  box.classList.remove('hidden');
+  $('pRodadas').replaceChildren(...rodadas.map((r) => {
+    const key = p.id + '/r-' + r.numero;
+    const uso = r.uso || {};
+    const temBrl = typeof uso.total?.brl === 'number' && Number.isFinite(uso.total.brl) && uso.total.brl > 0;
+    const corpo = [];
+    const resumo = r.plano?.resumo;
+    if (resumo) corpo.push(el('p', { class: 'hint', text: resumo }));
+    const tarefasRodada = r.plano?.tarefas || (p.plano?.tarefas || []).filter((t) => r.status?.[t.id]);
+    if (tarefasRodada.length) {
+      corpo.push(el('table', { class: 'uso-tabela' },
+        el('thead', {}, el('tr', {},
+          el('th', { text: 'Tarefa' }), el('th', { text: 'Tipo' }), el('th', { text: 'Nível' }),
+          el('th', { text: 'Modelos' }), el('th', { text: 'Depende' }), el('th', { text: 'Estado' }))),
+        el('tbody', {}, ...tarefasRodada.map((t) => {
+          const st = r.status?.[t.id] || {};
+          const estadoTxt = st.state ? (TAREFA[st.state] || ESTADOS[st.state] || st.state) + (st.model ? ` (${st.model})` : '') : 'pendente';
+          return el('tr', {},
+            el('td', {}, el('details', { open: promptsRodadaAbertos.has(key + '/' + t.id), ontoggle: (e) => { const k = key + '/' + t.id; if (e.target.open) promptsRodadaAbertos.add(k); else promptsRodadaAbertos.delete(k); } },
+              el('summary', { text: `${t.id}: ${t.titulo || ''}` }), el('pre', { text: t.prompt }))),
+            el('td', { text: t.tipo }),
+            el('td', { text: t.nivel }),
+            el('td', { class: 'chain', text: (t.cadeiaEfetiva || []).join(' → ') || '-' }),
+            el('td', { text: (t.depende || []).join(', ') || '-' }),
+            el('td', {}, st.state ? el('span', { class: 'badge ' + st.state, text: estadoTxt }) : el('span', { class: 'hint', text: 'pendente' })));
+        }))));
+    }
+    if (uso.modelos?.length || uso.total) {
+      corpo.push(el('h4', { text: 'Uso da rodada' }), el('div', { class: 'uso-rolagem' }, criarTabelaUsoModelos(uso.modelos || [], uso.total || null, temBrl)));
+    }
+    if (r.resumoFinal) {
+      const rk = key + '/resumo';
+      corpo.push(el('details', { open: promptsRodadaAbertos.has(rk), ontoggle: (e) => { if (e.target.open) promptsRodadaAbertos.add(rk); else promptsRodadaAbertos.delete(rk); } },
+        el('summary', { text: 'Resumo da execução da rodada' }), el('pre', { class: 'log', text: r.resumoFinal })));
+    }
+    const modoRodada = r.modo ? `${r.modo}${r.velocidade ? ' · ' + r.velocidade : ''}` : '';
+    const datasRodada = (r.inicio || r.fim) ? `${r.inicio ? 'início ' + new Date(r.inicio).toLocaleString('pt-BR') : ''}${r.fim ? (r.inicio ? ' · ' : '') + 'fim ' + new Date(r.fim).toLocaleString('pt-BR') : ''}` : '';
+    let custoRodada = '';
+    if (uso.total?.usd != null) {
+      custoRodada = `US$ ${fmtUsd(uso.total.usd)}`;
+      if (temBrl && uso.total?.brl != null) custoRodada += ` · R$ ${fmtBrl(uso.total.brl)}`;
+    }
+    return el('details', { class: 'rodada-item', open: rodadasAbertas.has(key), ontoggle: (e) => { if (e.target.open) rodadasAbertas.add(key); else rodadasAbertas.delete(key); } },
+      el('summary', { class: 'rodada-sum' },
+        el('strong', { text: `Rodada ${r.numero}: ${r.titulo || ''}` }),
+        r.estado ? el('span', { class: 'badge ' + r.estado, text: ESTADOS[r.estado] || r.estado }) : null,
+        modoRodada ? el('span', { class: 'hint', text: modoRodada }) : null,
+        datasRodada ? el('span', { class: 'hint', text: datasRodada }) : null,
+        custoRodada ? el('span', { class: 'hint', text: custoRodada }) : null),
+      el('div', { class: 'rodada-corpo' }, ...corpo));
+  }));
+}
+
 function renderGates(gates, pid, box) {
   box.classList.toggle('hidden', !gates.length);
   box.replaceChildren(...gates.map((g) => {
@@ -344,7 +418,7 @@ function render(p) {
   $('pEnviar').disabled = $('pGerar').disabled = p.ocupado || rodando;
   renderGates(p.run?.gates || [], p.id, $('pGates'));
   const ps = $('pPerfil'); if (ps) { if (document.activeElement !== ps) ps.value = p.perfil || ''; ps.disabled = rodando; }
-  renderMsgs(p); renderPlano(p);
+  renderMsgs(p); renderPlano(p); renderRodadas(p);
   atualizarFluxo($('pFluxo'), dadosFluxoProj(p));
   $('log').textContent = p.run?.log || '';
   $('relatorio').textContent = p.relatorio || '';
@@ -395,9 +469,20 @@ function linhaCota(l, { compacta = false, aoAtualizar } = {}) {
   if (l.renovaEm) info.push('renova ' + new Date(l.renovaEm).toLocaleString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) + emTempo(l.renovaEm));
   if (l.lidoEm) info.push('lido às ' + new Date(l.lidoEm).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }));
   if (l.nota || l.fonte) info.push(l.nota || l.fonte);
-  const box = el('div', { class: cls }, el('span', { class: 'cota-nome', text: nome }));
+  const box = el('div', { class: cls },
+    el('span', { class: 'cota-nome', text: nome }),
+    el('span', { class: 'cota-pct', text: pct })
+  );
   if (r !== null) box.append(el('progress', { class: 'cota-barra', max: 100, value: Math.round(r * 100) }));
-  box.append(el('span', { class: 'cota-pct', text: pct }), el('span', { class: 'cota-info', text: info.join(' · ') }));
+  if (info.length) box.append(el('span', { class: 'cota-info', text: info.join(' · ') }));
+  if (l.chave !== 'opencode' && l.estimativa) {
+    const txt = l.estimativa.disponivel !== false && l.estimativa.texto ? l.estimativa.texto : '1% de cota: dados insuficientes';
+    const estSpan = el('span', { class: 'cota-info cota-estimativa', text: txt });
+    if (l.estimativa.faixaEntrada && l.estimativa.faixaSaida) {
+      estSpan.title = `Faixa de confiança (${l.estimativa.confianca || 'baixa'}): entrada [${l.estimativa.faixaEntrada.join(' - ')}], saída [${l.estimativa.faixaSaida.join(' - ')}]`;
+    }
+    box.append(estSpan);
+  }
   if (l.atual) {
     const ms = (l.modelosAtuais || []).map((x) => `${x.modelo} (${x.tarefa})`).join(', ');
     box.append(el('span', { class: 'cota-agora', text: 'trabalhando agora: ' + ms }));
@@ -420,8 +505,11 @@ function renderCotas(d) {
   const grupos = new Map();
   for (const l of d.linhas || []) { const g = l.grupo || ''; if (!grupos.has(g)) grupos.set(g, []); grupos.get(g).push(l); }
   const blocos = [];
-  for (const [g, ls] of grupos) { if (g) blocos.push(el('h3', { class: 'cotas-grupo', text: g })); blocos.push(...ls.map((l) => el('div', { class: 'card' }, linhaCota(l)))); }
-  $('cotasLista').replaceChildren(...(blocos.length ? blocos : [el('p', { class: 'card hint', text: 'Sem leitura de cotas ainda.' })]));
+  for (const [g, ls] of grupos) {
+    if (g) blocos.push(el('h4', { class: 'cotas-grupo', text: g }));
+    blocos.push(...ls.map((l) => linhaCota(l, { compacta: true })));
+  }
+  $('cotasLista').replaceChildren(...(blocos.length ? blocos : [el('p', { class: 'hint', text: 'Sem leitura de cotas ainda.' })]));
   $('cotasLista').classList.toggle('cota-lendo', cotasAtualizando);
   const partes = [];
   if (d.lidoEm) partes.push('Última leitura às ' + new Date(d.lidoEm).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) + (d.idadeMin != null ? ` (há ${d.idadeMin} min)` : '') + '.');
@@ -474,12 +562,32 @@ let pUsoBusy = false, pUsoUltima = 0, pUsoId = null, pUsoEmAndamento = false;
 function getUsoPeriodo() {
   try {
     const s = localStorage.getItem('delegar.uso.periodo');
-    if (['hoje', '7d', '30d', 'tudo'].includes(s)) return s;
+    if (['hoje', '7d', '30d', 'tudo', 'mes', 'intervalo'].includes(s)) return s;
   } catch {}
   return '30d';
 }
 function setUsoPeriodo(v) {
   try { localStorage.setItem('delegar.uso.periodo', v); } catch {}
+}
+
+function atualizarControlesPeriodoUso() {
+  const v = $('usoPeriodo')?.value || getUsoPeriodo();
+  const boxMes = $('usoMesBox');
+  const boxDe = $('usoDeBox');
+  const boxAte = $('usoAteBox');
+  if (boxMes) boxMes.classList.toggle('hidden', v !== 'mes');
+  if (boxDe) boxDe.classList.toggle('hidden', v !== 'intervalo');
+  if (boxAte) boxAte.classList.toggle('hidden', v !== 'intervalo');
+
+  if (v === 'mes') {
+    const inpMes = $('usoMes');
+    if (inpMes && !inpMes.value) {
+      const agora = new Date();
+      const a = agora.getFullYear();
+      const m = String(agora.getMonth() + 1).padStart(2, '0');
+      inpMes.value = `${a}-${m}`;
+    }
+  }
 }
 
 function fmtTokens(n) {
@@ -611,11 +719,13 @@ function criarTabelaUsoTarefas(tarefas, emAndamento) {
       el('th', { class: 'num', text: 'US$' })
     )
   );
+  const rodadasTarefa = new Set((tarefas || []).map((t) => t.rodada).filter((x) => x != null));
+  const prefRodada = rodadasTarefa.size > 1 ? (t) => (t.rodada != null ? `R${t.rodada} · ` : '') : () => '';
   let somaTokens = 0, somaUsd = null;
   const rows = (tarefas || []).map((t) => {
-    const nomeTarefa = t.id === 'planejador'
+    const nomeTarefa = prefRodada(t) + (t.id === 'planejador'
       ? 'Planejador' + (t.titulo ? ': ' + t.titulo : '')
-      : `${t.id}${t.titulo ? ': ' + t.titulo : ''}`;
+      : `${t.id}${t.titulo ? ': ' + t.titulo : ''}`);
     const rodando = t.estado === 'running' || (emAndamento && t.estado === 'running');
     const tdTarefa = el('td', {},
       el('strong', { text: nomeTarefa }),
@@ -669,6 +779,50 @@ function criarTabelaUsoTarefas(tarefas, emAndamento) {
       el('td', { class: 'num', title: fmtUsdExato(somaUsd) }, fmtUsd(somaUsd))
     );
     tbody.append(totalRow);
+  }
+  return el('table', { class: 'uso-tabela' }, thead, tbody);
+}
+
+function criarTabelaUsoRodadas(rodadas, temBrl) {
+  const soma = { entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0 };
+  let usdSoma = null, brlSoma = null;
+  for (const r of rodadas || []) {
+    const u = r.total || r.uso?.total || {};
+    soma.entrada += u.entrada || 0; soma.saida += u.saida || 0; soma.cacheLido += u.cacheLido || 0; soma.cacheGravado += u.cacheGravado || 0;
+    if (u.usd != null) usdSoma = (usdSoma ?? 0) + u.usd;
+    if (u.brl != null) brlSoma = (brlSoma ?? 0) + u.brl;
+  }
+  const colMoeda = (rotulo) => el('th', { class: 'num', text: rotulo });
+  const thead = el('thead', {},
+    el('tr', {},
+      el('th', { text: 'Rodada' }),
+      el('th', { text: 'Estado' }),
+      colMoeda('Entrada'), colMoeda('Saída'), colMoeda('Cache lido'), colMoeda('Cache gravado'),
+      colMoeda('US$'),
+      temBrl ? colMoeda('R$') : null
+    )
+  );
+  const tdTokens = (v) => el('td', { class: 'num', title: fmtExato(v) ? fmtExato(v) + ' tokens' : '' }, fmtTokens(v));
+  const tdUsd = (v) => el('td', { class: 'num', title: fmtUsdExato(v) }, fmtUsd(v));
+  const tdBrl = (v) => el('td', { class: 'num', title: fmtBrlExato(v) }, fmtBrl(v));
+  const linhaRodada = (r) => {
+    const u = r.total || r.uso?.total || {};
+    return el('tr', {},
+      el('td', {}, el('strong', { text: `R${r.numero}` }), r.titulo ? el('span', { class: 'hint', text: ' ' + r.titulo }) : null),
+      el('td', {}, el('span', { class: 'badge ' + (r.estado || ''), text: TAREFA[r.estado] || ESTADOS[r.estado] || r.estado || '-' })),
+      tdTokens(u.entrada), tdTokens(u.saida), tdTokens(u.cacheLido), tdTokens(u.cacheGravado),
+      tdUsd(u.usd),
+      temBrl ? tdBrl(u.brl) : null
+    );
+  };
+  const tbody = el('tbody', {}, ...(rodadas || []).map(linhaRodada));
+  if ((rodadas || []).length > 1) {
+    tbody.append(el('tr', { class: 'uso-total' },
+      el('td', { colSpan: 2 }, el('strong', { text: 'Total das rodadas' })),
+      tdTokens(soma.entrada), tdTokens(soma.saida), tdTokens(soma.cacheLido), tdTokens(soma.cacheGravado),
+      tdUsd(usdSoma),
+      temBrl ? tdBrl(brlSoma) : null
+    ));
   }
   return el('table', { class: 'uso-tabela' }, thead, tbody);
 }
@@ -733,11 +887,33 @@ function renderUso(d, infoPrecos) {
 async function refreshUso(forcar) {
   if (usoBusy) return;
   if (!forcar && Date.now() - usoUltima < 30000 - 1500) return;
-  usoBusy = true;
+
   const per = $('usoPeriodo')?.value || getUsoPeriodo();
+  let urlUso = null;
+  if (per === 'mes') {
+    const mes = $('usoMes')?.value;
+    if (mes) {
+      urlUso = `/api/uso?mes=${encodeURIComponent(mes)}`;
+    }
+  } else if (per === 'intervalo') {
+    const de = $('usoDe')?.value;
+    const ate = $('usoAte')?.value;
+    const p = [];
+    if (de) p.push(`de=${encodeURIComponent(de)}`);
+    if (ate) p.push(`ate=${encodeURIComponent(ate)}`);
+    if (p.length > 0) {
+      urlUso = `/api/uso?${p.join('&')}`;
+    }
+  } else {
+    urlUso = `/api/uso?periodo=${encodeURIComponent(per)}`;
+  }
+
+  if (!urlUso) return;
+
+  usoBusy = true;
   try {
     const [d, infoPrecos] = await Promise.all([
-      call('GET', `/api/uso?periodo=${encodeURIComponent(per)}`),
+      call('GET', urlUso),
       call('GET', '/api/precos').catch(() => null),
     ]);
     renderUso(d, infoPrecos);
@@ -756,6 +932,7 @@ function renderUsoProjeto(d) {
   const tot = d.total || {};
   const temBrl = typeof tot.brl === 'number' && Number.isFinite(tot.brl) && tot.brl > 0;
   const totalTokens = (tot.entrada || 0) + (tot.saida || 0) + (tot.cacheLido || 0) + (tot.cacheGravado || 0);
+  const rodadas = Array.isArray(d.rodadas) ? d.rodadas : [];
 
   // 1. Total
   const totalKids = [
@@ -774,6 +951,9 @@ function renderUsoProjeto(d) {
   if (d.emAndamento) {
     totalKids.push(' ', el('span', { class: 'uso-vivo', text: '· em andamento' }));
   }
+  if (rodadas.length > 1) {
+    totalKids.push(' ', el('span', { class: 'hint', text: `(${rodadas.length} rodadas)` }));
+  }
   $('pUsoTotal').replaceChildren(el('p', {}, ...totalKids));
 
   // 2. Modelos
@@ -785,6 +965,17 @@ function renderUsoProjeto(d) {
     );
   } else {
     boxModelos.replaceChildren();
+  }
+
+  // 2.5 Rodadas
+  const boxRodadas = $('pUsoRodadas');
+  if (rodadas.length > 1) {
+    boxRodadas.replaceChildren(
+      el('h4', { text: 'Por rodada' }),
+      el('div', { class: 'uso-rolagem' }, criarTabelaUsoRodadas(rodadas, temBrl))
+    );
+  } else {
+    boxRodadas.replaceChildren();
   }
 
   // 3. Tarefas
@@ -815,6 +1006,7 @@ async function refreshUsoProjeto(id, forcar = false) {
       $('pUsoBox').classList.remove('hidden');
       $('pUsoTotal').replaceChildren(el('p', { class: 'erro', text: 'Não foi possível ler o uso do projeto: ' + e.message }));
       $('pUsoModelos').replaceChildren();
+      $('pUsoRodadas').replaceChildren();
       $('pUsoTarefas').replaceChildren();
     }
   } finally {
@@ -857,6 +1049,8 @@ $('btnNovo').onclick = () => {
 };
 $('btnCotas').onclick = () => { atual = null; show('cotas'); history.replaceState(null, '', '#cotas'); refreshCotas(true); refreshUso(true); iniciarTimer(); };
 $('btnAtividade').onclick = () => { atual = null; show('atividade'); history.replaceState(null, '', '#atividade'); refreshAtividade(); iniciarTimer(); };
+const btnAtCotas = $('btnAtualizarCotas');
+if (btnAtCotas) btnAtCotas.onclick = () => atualizarCotas();
 $('nCancelar').onclick = () => show('vazio');
 function descNovo() {
   const k = $('nModo').value;
@@ -955,11 +1149,19 @@ $('pExcluir').onclick = async () => {
   const selPer = $('usoPeriodo');
   if (selPer) {
     selPer.value = getUsoPeriodo();
+    atualizarControlesPeriodoUso();
     selPer.onchange = () => {
       setUsoPeriodo(selPer.value);
+      atualizarControlesPeriodoUso();
       refreshUso(true);
     };
   }
+  const inpMes = $('usoMes');
+  if (inpMes) inpMes.onchange = () => refreshUso(true);
+  const inpDe = $('usoDe');
+  if (inpDe) inpDe.onchange = () => refreshUso(true);
+  const inpAte = $('usoAte');
+  if (inpAte) inpAte.onchange = () => refreshUso(true);
   $('modosInfo').replaceChildren(
     ...Object.values(MODES).map((m) => el('div', {}, el('strong', { text: m.nome }), el('p', { class: 'hint', text: m.descricao }), el('p', { class: 'hint mono', text: 'Planejador neste PC: ' + (m.plannerEfetivo[0] || 'nenhum instalado') }))),
     el('div', {}, el('strong', { text: 'Personalizado' }), el('p', { class: 'hint', text: 'Escolha os modelos de cada papel do zero, ou parta de um modo pronto e troque o que quiser.' })),

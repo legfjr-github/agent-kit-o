@@ -10,10 +10,55 @@ import { fileURLToPath } from 'node:url';
 import { entradaValida, QUOTA_RE, DESESPERO, adaptar, catalogo, detectar, desesperoEfetivo, iniciarDescoberta } from './modelos.mjs';
 import { criarPerfis, validarNome } from './perfis.mjs';
 import { linhasDeCotas, cotasDoProjeto } from './cotas.mjs';
+import { registrarHistoricoCota, lerHistoricoCotas, coletarTentativasUso, estimarTokensPorCota } from './cotas-estimativa.mjs';
 import { modeloSemEsforco, usoClaudeJson, usoOpencode, usoAgyStream, estimar, usoDaTentativa, usoAgyBrain } from './uso.mjs';
 import { carregarPrecos, custoUsd, assinaturaDe, emBrl, idadeDias, atualizarPrecos, atualizarSeVencido } from './precos.mjs';
+import {
+  temRodadaExecutada,
+  limparLogsRaiz,
+  arquivarRodada,
+  contextoRodadasParaPlanejador,
+  dadosUsoProjetoComRodadas,
+  migrarRodadas,
+} from './rodadas.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+export function ehLoopback(endereco) {
+  return typeof endereco === 'string' && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(endereco.trim());
+}
+
+export function validarHostEscuta(env = process.env, argv = process.argv) {
+  const chavesEnv = ['DELEGAR_HOST', 'HOST', 'BIND_HOST'];
+  for (const k of chavesEnv) {
+    if (env && env[k] != null && String(env[k]).trim() !== '') {
+      const v = String(env[k]).trim();
+      if (v !== '127.0.0.1') {
+        return { ok: false, erro: 'O painel Delegar só pode escutar em 127.0.0.1 (acesso exclusivo deste computador).' };
+      }
+    }
+  }
+  if (Array.isArray(argv)) {
+    for (let i = 0; i < argv.length; i++) {
+      const arg = String(argv[i]);
+      for (const prefix of ['--host=', '--bind=', '-H=']) {
+        if (arg.startsWith(prefix)) {
+          const v = arg.slice(prefix.length).trim();
+          if (v !== '127.0.0.1') {
+            return { ok: false, erro: 'O painel Delegar só pode escutar em 127.0.0.1 (acesso exclusivo deste computador).' };
+          }
+        }
+      }
+      if (['--host', '--bind', '-H'].includes(arg)) {
+        const proximo = argv[i + 1] != null ? String(argv[i + 1]).trim() : '';
+        if (proximo !== '127.0.0.1') {
+          return { ok: false, erro: 'O painel Delegar só pode escutar em 127.0.0.1 (acesso exclusivo deste computador).' };
+        }
+      }
+    }
+  }
+  return { ok: true, host: '127.0.0.1' };
+}
 
 // server.log com data e hora e com o motivo da saída. Se o painel sumir sem a linha "painel saiu",
 // o processo foi encerrado de fora (ex.: fechou a sessão do agente que o abriu).
@@ -127,6 +172,8 @@ function validarCustom(c) {
   }
   const mc = Number(c.maxConcurrent);
   out.maxConcurrent = Number.isInteger(mc) && mc >= 1 && mc <= 6 ? mc : 2;
+  // semGratuitos: nenhuma cadeia ganha os modelos gratuitos do opencode, nem o modo desespero automático.
+  if (c.semGratuitos === true) out.semGratuitos = true;
   return { errs, custom: out };
 }
 // Converte um modo pronto em personalizado (volume alternado vira a primeira cadeia).
@@ -213,7 +260,7 @@ function chainFor(p, t, idx = 0) {
     const esf = esforcoDaTarefa(p, t);
     if (esf) c = comEsforco(c, esf);
   }
-  const adaptada = comReserva(adaptar(c));
+  const adaptada = m?.semGratuitos ? adaptar(c) : comReserva(adaptar(c));
   return adaptada.length ? adaptada : c;
 }
 function comReserva(c) {
@@ -221,6 +268,26 @@ function comReserva(c) {
   return [...c, ...extra].slice(0, Math.max(8, c.length));
 }
 const wtName = (p, t) => `${p.id.slice(-6)}-${t.id}`.replace(/[^a-z0-9_-]/gi, '-');
+
+function arquivarRodadaSePreciso(p, { manterPlano = false } = {}) {
+  if (!temRodadaExecutada(p, pdir(p.id))) return null;
+  const planoCopia = (manterPlano && p.plano) ? JSON.parse(JSON.stringify(p.plano)) : null;
+  const r = arquivarRodada(p, {
+    projDir: pdir(p.id),
+    dataDir: DATA,
+    tabela: carregarPrecos({ dataDir: DATA }),
+    chainFor,
+    nomeModo,
+    velDe,
+    supDe,
+    resumoFinal,
+  });
+  if (manterPlano && planoCopia) {
+    p.plano = planoCopia;
+  }
+  save(p);
+  return r;
+}
 
 // ---------- planejador ----------
 function parseEntry(e) {
@@ -313,16 +380,21 @@ function introducao(p) {
   const velTxt = vel === 'auto'
     ? 'Velocidade: auto (defina o esforço "low", "medium" ou "high" em cada tarefa do plano).'
     : `Velocidade: ${vel} (o esforço da execução já está fixado pelo usuário; o campo esforco nas tarefas será ignorado).`;
-  return `Pedido do usuário:\n${p.pedido}\n\nRepositório: ${p.repo} (${isGitRepo(p.repo) ? 'git' : 'não é git: não use escritores'})\n` +
+  let intro = `Pedido do usuário:\n${p.pedido}\n\nRepositório: ${p.repo} (${isGitRepo(p.repo) ? 'git' : 'não é git: não use escritores'})\n` +
     `Cofre de conhecimento: ${VAULT}\nModo: ${m.nome}. ${m.descricao}\n${velTxt}\nAcompanhamento: ${SUPERVISAO[supDe(p)]}\n` +
     `Provedores instalados neste PC: ${Object.entries(detectar()).filter(([, v]) => v).map(([k]) => k).join(', ') || 'nenhum'}\n` +
     (p.auto ? '\nMODO AUTOMÁTICO: não faça perguntas. Analise o necessário e entregue já nesta resposta o plano final no formato combinado.'
       : '\nConverse para fechar o escopo. Se o pedido já estiver claro, proponha o plano final no formato combinado.');
+  if (Array.isArray(p.rodadas) && p.rodadas.length > 0) {
+    const ctx = contextoRodadasParaPlanejador(p);
+    if (ctx) intro += '\n\n' + ctx;
+  }
+  return intro;
 }
 // Prompt com a conversa inteira, para provedor sem sessão retomável ou quando o planejador mudou.
 function transcricao(p, novo) {
   const hist = p.mensagens.filter((m) => m.papel !== 'sistema').slice(1, -1)
-    .map((m) => `[${m.papel === 'usuario' ? 'Usuário' : 'Planejador'}]\n${m.texto}`).join('\n\n');
+    .map((m) => `[${m.papel === 'usuario' ? 'Usuário' : (m.papel === 'resumo' ? 'Resumo da execução' : 'Planejador')}]\n${m.texto}`).join('\n\n');
   return `${introducao(p)}\n\n## Conversa até agora\n${hist || '(nenhuma)'}\n\n## Nova mensagem do usuário\n${novo}`;
 }
 
@@ -335,10 +407,16 @@ async function chamarPlanejador(p, texto) {
     const { prov, model, effort } = parseEntry(entry);
     const mesmo = p.sessao && p.sessaoDe === entry && prov !== 'agy';
     const primeiro = !p.mensagens.some((m) => m.papel === 'planejador');
-    const prompt = mesmo ? texto : primeiro ? introducao(p) + (texto !== p.pedido ? '\n\n' + texto : '') : transcricao(p, texto);
+    let prompt = mesmo ? texto : primeiro ? introducao(p) + (texto !== p.pedido ? '\n\n' + texto : '') : transcricao(p, texto);
+    if (mesmo && p.contextoRodadaPendente) {
+      prompt = p.contextoRodadaPendente + '\n\n## Novo pedido do usuário\n' + texto;
+    }
     const run = prov === 'claude' ? runClaude : prov === 'opencode' ? runOpencode : runAgy;
     evento(p, { tipo: 'planejador', modelo: entry, texto: 'planejador pensando' });
     const r = await run({ cwd: p.repo, model, effort, prompt, resume: mesmo ? p.sessao : null, entry });
+    if (r.ok && p.contextoRodadaPendente) {
+      delete p.contextoRodadaPendente;
+    }
     if (!p.uso || typeof p.uso !== 'object') p.uso = { chamadas: [] };
     if (!Array.isArray(p.uso.chamadas)) p.uso.chamadas = [];
     p.uso.chamadas.push({ quando: horaLocal(), papel: 'planejador', ...(r.uso || null) });
@@ -443,6 +521,16 @@ function validatePlan(pl, isGit) {
   if (!pl || typeof pl !== 'object') return ['plano vazio'];
   if (!Array.isArray(pl.tarefas) || !pl.tarefas.length) errs.push('sem tarefas');
   if ((pl.tarefas || []).length > 40) errs.push('mais de 40 tarefas');
+  if (Array.isArray(pl.tarefas)) {
+    const qtdEscritores = pl.tarefas.filter((t) => t && t.tipo === 'escritor').length;
+    if (pl.maxConcurrent == null) {
+      if (qtdEscritores > 0) pl.maxConcurrent = Math.min(6, Math.max(2, qtdEscritores));
+    } else {
+      const mc = Number(pl.maxConcurrent);
+      if (!Number.isInteger(mc) || mc < 1 || mc > 6) errs.push('maxConcurrent deve ser inteiro de 1 a 6');
+      else pl.maxConcurrent = mc;
+    }
+  }
   const ids = new Set();
   for (const t of pl.tarefas || []) {
     if (typeof t.id !== 'string' || !/^[a-z0-9_-]{1,32}$/.test(t.id)) errs.push(`id inválido: ${t.id}`);
@@ -509,6 +597,7 @@ async function plannerTurn(p, userText, { gerar = false } = {}) {
       }
       return p;
     }
+    if (temRodadaExecutada(p, pdir(p.id))) arquivarRodadaSePreciso(p);
     p.plano = plan; p.estado = 'plano_pronto'; p._corrigido = false;
     if (plan.titulo && !p.tituloFixo) p.titulo = String(plan.titulo).slice(0, 120);
     p.mensagens.push({ papel: 'sistema', texto: `Plano recebido: ${plan.tarefas.length} tarefas.`, quando: now() });
@@ -529,8 +618,37 @@ const LIMITE_PARALELO = 6;
 function paralelismo(p, m) {
   const pedido = Number(p.plano?.maxConcurrent);
   const modo = Number(m.maxConcurrent) || 2;
-  if ((p.auto || supDe(p) === 'automatico') && Number.isInteger(pedido) && pedido >= 1) return Math.min(pedido, LIMITE_PARALELO);
+  const escritores = Array.isArray(p.plano?.tarefas) ? p.plano.tarefas.filter((t) => t && t.tipo === 'escritor').length : 0;
+  if (p.auto || supDe(p) === 'automatico') {
+    if (Number.isInteger(pedido) && pedido >= 1) return Math.min(pedido, LIMITE_PARALELO);
+    if (escritores >= 2) return Math.min(Math.max(modo, escritores), LIMITE_PARALELO);
+    return modo;
+  }
   return Math.max(1, Math.min(Number.isInteger(pedido) && pedido >= 1 ? pedido : modo, modo));
+}
+
+function semGratuitosReserva(lista, p, explicitos = []) {
+  if (!Array.isArray(lista) || p?.modo === 'desespero') return lista;
+  const temPago = lista.some((m) => typeof m === 'string' && (m.startsWith('claude:') || m.startsWith('agy:')));
+  if (!temPago) return lista;
+  const ehGratuito = (m) => {
+    if (typeof m !== 'string') return false;
+    const semEsf = m.split('@')[0];
+    return (semEsf.startsWith('opencode:') && (semEsf.endsWith('-free') || semEsf === 'opencode:opencode/big-pickle'))
+      || DESESPERO.includes(semEsf);
+  };
+  const expSet = new Set((Array.isArray(explicitos) ? explicitos : []).map((m) => (typeof m === 'string' ? m.split('@')[0] : m)));
+  const res = [...lista];
+  while (res.length > 0) {
+    const ult = res[res.length - 1];
+    const semEsf = typeof ult === 'string' ? ult.split('@')[0] : ult;
+    if (ehGratuito(ult) && !expSet.has(semEsf)) {
+      res.pop();
+    } else {
+      break;
+    }
+  }
+  return res;
 }
 
 function buildPlanFile(p) {
@@ -542,6 +660,9 @@ function buildPlanFile(p) {
   const tasks = p.plano.tarefas.map((t) => {
     let text = t.prompt;
     const o = { id: t.id, titulo: String(t.titulo || '').slice(0, 120), chain: chainFor(p, t, t.nivel === 'volume' ? vol++ : 0), after: t.depende, confirm: !!t.confirmar, reason: t.motivo || '' };
+    if (t.tipo !== 'escritor' && t.nivel !== 'leve') {
+      o.chain = semGratuitosReserva(o.chain, p, t.cadeia || []);
+    }
     if (t.tipo === 'escritor') {
       o.worktree = wtName(p, t);
     } else {
@@ -558,15 +679,37 @@ function buildPlanFile(p) {
   });
   const vol0 = Array.isArray(m.tiers.volume[0]) ? m.tiers.volume[0] : m.tiers.volume;
   const esfIv = esforcoIntegracaoVerificacao(p);
-  const fixChain = esfIv ? comEsforco(m.fix, esfIv) : m.fix;
-  const coordChain = esfIv ? comEsforco(m.coord, esfIv) : m.coord;
+
+  const tarefasComCadeia = (p.plano?.tarefas || []).filter((t) => Array.isArray(t.cadeia) && t.cadeia.length);
+  const tarefasPriorizadas = [
+    ...tarefasComCadeia.filter((t) => t.tipo === 'integrador' || t.tipo === 'tarefa'),
+    ...tarefasComCadeia.filter((t) => t.tipo === 'escritor'),
+  ];
+  const modelosEditados = [];
+  for (const t of tarefasPriorizadas) {
+    for (const mod of t.cadeia) {
+      if (!modelosEditados.includes(mod)) modelosEditados.push(mod);
+    }
+  }
+
+  const modelosEditadosAjustados = esfIv ? comEsforco(modelosEditados, esfIv) : modelosEditados;
+  const fixBase = esfIv ? comEsforco(m.fix, esfIv) : m.fix;
+  const coordBase = esfIv ? comEsforco(m.coord, esfIv) : m.coord;
+
+  const fixJunto = [...new Set([...modelosEditadosAjustados, ...fixBase])];
+  const coordJunto = [...new Set([...modelosEditadosAjustados, ...coordBase])];
+
+  const reservaG = (c) => (m?.semGratuitos ? c : comReserva(c));
+  const fixEfetiva = semGratuitosReserva(reservaG(adaptar(fixJunto)), p, modelosEditados);
+  const coordEfetiva = semGratuitosReserva(reservaG(adaptar(coordJunto)), p, modelosEditados);
+
   const vel = velDe(p);
   const esfExec = vel === 'rapido' ? 'low' : (vel === 'medio' ? 'medium' : (vel === 'demorado' ? 'high' : null));
   const chainBase = esfExec ? comEsforco(vol0, esfExec) : vol0;
   const plan = {
-    name: p.id, repo: p.repo, worktreeRoot: p.repo + '-wt', logDir: path.join(dir, 'logs'),
-    chain: comReserva(adaptar(chainBase)), fixChain: comReserva(adaptar(fixChain)), coordinatorChain: comReserva(adaptar(coordChain)),
-    desperateChain: adaptar(desesperoEfetivo(), []), supervision: supDe(p),
+    name: p.id, mode: p.modo, repo: p.repo, worktreeRoot: p.repo + '-wt', logDir: path.join(dir, 'logs'),
+    chain: reservaG(adaptar(chainBase)), fixChain: fixEfetiva, coordinatorChain: coordEfetiva,
+    desperateChain: m?.semGratuitos ? [] : adaptar(desesperoEfetivo(), []), supervision: supDe(p),
     maxConcurrent: paralelismo(p, m),
     maxRecoveries: 2, verify: (p.plano.verify || []).filter((v) => typeof v === 'string' && v.trim()), tasks,
   };
@@ -592,8 +735,9 @@ function gravarSupervisao(p) {
 
 function startPipeline(p, resume = false) {
   if (!p.plano) return p;
+  if (!resume && temRodadaExecutada(p, pdir(p.id))) arquivarRodadaSePreciso(p, { manterPlano: true });
   const pf = resume ? path.join(pdir(p.id), 'plan.json') : buildPlanFile(p);
-  if (!resume) fs.rmSync(path.join(pdir(p.id), 'logs'), { recursive: true, force: true });
+  if (!resume) limparLogsRaiz(path.join(pdir(p.id), 'logs'));
   else gravarSupervisao(p);
   try { p.pid = spawnPipeline(pf, resume); }
   catch (e) {
@@ -839,353 +983,12 @@ function lerResultJsonComCache(arquivo) {
 }
 
 function dadosUsoDoProjeto(p, tabela) {
-  tabela = tabela || carregarPrecos({ dataDir: DATA });
-  const logsDir = path.join(pdir(p.id), 'logs');
-  const run = readRun(p);
-  const st = run.status || {};
-
-  // 1. Pseudotarefa 'planejador'
-  const chamadas = Array.isArray(p?.uso?.chamadas) ? p.uso.chamadas : [];
-  const tentativasPlan = [];
-  const planTotal = { entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0, usd: 0, brl: 0, aproximado: false, origem: 'cli' };
-  const planOrigens = [];
-
-  for (const ch of chamadas) {
-    if (!ch || typeof ch !== 'object') continue;
-    const { provedor: chProv, modelo: chMod } = partesModelo(ch.modelo || 'desconhecido');
-    const linhas = Array.isArray(ch.porModelo) && ch.porModelo.length ? ch.porModelo : [{
-      provedor: chProv,
-      modelo: chMod,
-      entrada: num(ch.entrada),
-      saida: num(ch.saida),
-      cacheLido: num(ch.cacheLido),
-      cacheGravado: num(ch.cacheGravado),
-      custoCliUsd: numOuNull(ch.custoCliUsd)
-    }];
-
-    let chUsd = 0;
-    let chTemUsd = false;
-    const chOrigens = [];
-    const linhasComCusto = [];
-    for (const l of linhas) {
-      const c = custoUsd(tabela, l);
-      let o = c.origem;
-      if (ch.fonte === 'estimado' && o !== 'desconhecido') o = 'estimado';
-      chOrigens.push(o);
-      if (c.usd !== null) { chUsd += c.usd; chTemUsd = true; }
-      linhasComCusto.push({ ...l, usd: c.usd, origem: o });
-    }
-    const finalOrigem = piorOrigem(chOrigens);
-    const finalUsd = chTemUsd ? arred(chUsd) : null;
-
-    tentativasPlan.push({
-      modelo: chMod,
-      provedor: chProv,
-      entrada: num(ch.entrada),
-      saida: num(ch.saida),
-      cacheLido: num(ch.cacheLido),
-      cacheGravado: num(ch.cacheGravado),
-      usd: finalUsd,
-      origem: finalOrigem,
-      fonte: ch.fonte || 'cli',
-      inicio: ch.quando || null,
-      fim: ch.quando || null,
-      porModelo: linhasComCusto
-    });
-
-    planTotal.entrada += num(ch.entrada);
-    planTotal.saida += num(ch.saida);
-    planTotal.cacheLido += num(ch.cacheLido);
-    planTotal.cacheGravado += num(ch.cacheGravado);
-    if (finalUsd !== null) planTotal.usd = (planTotal.usd || 0) + finalUsd;
-    planOrigens.push(finalOrigem);
-  }
-  planTotal.usd = arred(planTotal.usd);
-  planTotal.brl = planTotal.usd !== null ? emBrl(tabela, planTotal.usd) : null;
-  planTotal.origem = piorOrigem(planOrigens);
-  planTotal.aproximado = planOrigens.some((o) => o === 'aproximado' || o === 'estimado');
-
-  const tarefaPlan = {
-    id: 'planejador',
-    titulo: 'Planejador',
-    estado: p.plano ? 'done' : (p.estado === 'planejando' ? 'running' : 'done'),
-    total: planTotal,
-    tentativas: tentativasPlan
-  };
-
-  // 2. Tarefas do plano
-  const tarefasOut = [tarefaPlan];
-  const tarefasPlano = Array.isArray(p?.plano?.tarefas) ? p.plano.tarefas : [];
-
-  for (const t of tarefasPlano) {
-    const tState = st[t.id]?.state || 'pending';
-    const ld = path.join(logsDir, t.id);
-    const ldFix = path.join(logsDir, `${t.id}-fix`);
-    const tentativasTarefa = [];
-    const tOrigens = [];
-    const tTotal = { entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0, usd: 0, brl: 0, aproximado: false, origem: 'cli' };
-
-    const processarDir = (dir) => {
-      if (!fs.existsSync(dir)) return;
-      const resFile = path.join(dir, 'result.json');
-      const res = fs.existsSync(resFile) ? lerResultJsonComCache(resFile) : null;
-      const attempts = Array.isArray(res?.attempts) ? res.attempts : [];
-      const completedIndices = new Set();
-
-      for (let idx = 0; idx < attempts.length; idx++) {
-        const a = attempts[idx];
-        completedIndices.add(idx + 1);
-        let uso = a.uso || (a.out ? comCacheArquivo(a.out, () => {
-          const pf = a.prompt || a.promptFile || a.out.replace(/\.out\.log$/, '.prompt.txt');
-          return usoDaTentativa({
-            tipo: a.worker?.split(':')[0],
-            modelo: a.worker,
-            out: a.out,
-            prompt: pf,
-            texto: a.text
-          });
-        }) : null);
-        if (a.out && uso?.fonte !== 'cli') {
-          const real = usoAgyReal(p, path.basename(dir), a.worker, a.out.replace(/\.out\.log$/, '.prompt.txt'), Date.parse(a.started), Date.parse(a.finished), false);
-          if (real) uso = real;
-        }
-
-        const { provedor, modelo } = partesModelo(a.worker || 'desconhecido');
-        const linhas = Array.isArray(uso?.porModelo) && uso.porModelo.length ? uso.porModelo : [{
-          provedor,
-          modelo,
-          entrada: num(uso?.entrada),
-          saida: num(uso?.saida),
-          cacheLido: num(uso?.cacheLido),
-          cacheGravado: num(uso?.cacheGravado),
-          custoCliUsd: numOuNull(uso?.custoCliUsd)
-        }];
-
-        let attUsd = 0;
-        let attTemUsd = false;
-        const attOrigens = [];
-        const linhasComCusto = [];
-        for (const l of linhas) {
-          const c = custoUsd(tabela, l);
-          let o = c.origem;
-          if (uso?.fonte === 'estimado' && o !== 'desconhecido') o = 'estimado';
-          attOrigens.push(o);
-          if (c.usd !== null) { attUsd += c.usd; attTemUsd = true; }
-          linhasComCusto.push({ ...l, usd: c.usd, origem: o });
-        }
-        const finalOrigem = piorOrigem(attOrigens);
-        const finalUsd = attTemUsd ? arred(attUsd) : null;
-
-        tentativasTarefa.push({
-          modelo,
-          provedor,
-          entrada: num(uso?.entrada),
-          saida: num(uso?.saida),
-          cacheLido: num(uso?.cacheLido),
-          cacheGravado: num(uso?.cacheGravado),
-          usd: finalUsd,
-          origem: finalOrigem,
-          fonte: uso?.fonte || 'cli',
-          inicio: a.started || null,
-          fim: a.finished || null,
-          porModelo: linhasComCusto
-        });
-
-        tTotal.entrada += num(uso?.entrada);
-        tTotal.saida += num(uso?.saida);
-        tTotal.cacheLido += num(uso?.cacheLido);
-        tTotal.cacheGravado += num(uso?.cacheGravado);
-        if (finalUsd !== null) tTotal.usd = (tTotal.usd || 0) + finalUsd;
-        tOrigens.push(finalOrigem);
-      }
-
-      // Tentativa em andamento (.out.log ainda não listado no result.json)
-      const outs = fs.readdirSync(dir).filter((f) => /^\d+-.*\.out\.log$/.test(f))
-        .sort((x, y) => parseInt(x) - parseInt(y));
-      for (const f of outs) {
-        const numTent = parseInt(f);
-        if (completedIndices.has(numTent)) continue;
-        const outPath = path.join(dir, f);
-        const curFile = path.join(dir, 'current.json');
-        const cur = fs.existsSync(curFile) ? lerJson(curFile) : null;
-        const workerEntry = (cur && cur.attempt === numTent && cur.worker) ? cur.worker : (() => {
-          const m = f.match(/^\d+-(.*)\.out\.log$/);
-          return m ? m[1].replace(/_/g, '-') : 'desconhecido';
-        })();
-        const pfPath = path.join(dir, f.replace(/\.out\.log$/, '.prompt.txt'));
-        const txtPath = path.join(dir, f.replace(/\.out\.log$/, '.txt'));
-
-        let inicioOut = NaN; try { inicioOut = fs.statSync(outPath).birthtimeMs; } catch {}
-        const realRodando = usoAgyReal(p, path.basename(dir), workerEntry, pfPath, inicioOut, NaN, true);
-        const uso = realRodando || comCacheArquivo(outPath, () => {
-          let u = usoDaTentativa({
-            tipo: workerEntry.split(':')[0],
-            modelo: workerEntry,
-            out: outPath,
-            prompt: pfPath,
-            texto: txtPath
-          });
-          if (!u) {
-            let pLen = 0, oLen = 0;
-            try { pLen = fs.statSync(pfPath).size; } catch {}
-            try { oLen = fs.statSync(outPath).size; } catch {}
-            if (pLen > 0 || oLen > 0) u = estimar(pLen, oLen, workerEntry);
-          }
-          return u;
-        });
-
-        const fonteTent = uso?.fonte === 'cli' ? 'cli-parcial' : (uso?.fonte || 'cli-parcial');
-        const { provedor, modelo } = partesModelo(workerEntry);
-        const linhas = Array.isArray(uso?.porModelo) && uso.porModelo.length ? uso.porModelo : [{
-          provedor,
-          modelo,
-          entrada: num(uso?.entrada),
-          saida: num(uso?.saida),
-          cacheLido: num(uso?.cacheLido),
-          cacheGravado: num(uso?.cacheGravado),
-          custoCliUsd: numOuNull(uso?.custoCliUsd)
-        }];
-
-        let attUsd = 0;
-        let attTemUsd = false;
-        const attOrigens = [];
-        const linhasComCusto = [];
-        for (const l of linhas) {
-          const c = custoUsd(tabela, l);
-          let o = c.origem;
-          if (fonteTent === 'estimado' && o !== 'desconhecido') o = 'estimado';
-          attOrigens.push(o);
-          if (c.usd !== null) { attUsd += c.usd; attTemUsd = true; }
-          linhasComCusto.push({ ...l, usd: c.usd, origem: o });
-        }
-        const finalOrigem = piorOrigem(attOrigens);
-        const finalUsd = attTemUsd ? arred(attUsd) : null;
-
-        tentativasTarefa.push({
-          modelo,
-          provedor,
-          entrada: num(uso?.entrada),
-          saida: num(uso?.saida),
-          cacheLido: num(uso?.cacheLido),
-          cacheGravado: num(uso?.cacheGravado),
-          usd: finalUsd,
-          origem: finalOrigem,
-          fonte: fonteTent,
-          inicio: (cur && cur.started) ? cur.started : (st[t.id]?.started || null),
-          fim: null,
-          porModelo: linhasComCusto
-        });
-
-        tTotal.entrada += num(uso?.entrada);
-        tTotal.saida += num(uso?.saida);
-        tTotal.cacheLido += num(uso?.cacheLido);
-        tTotal.cacheGravado += num(uso?.cacheGravado);
-        if (finalUsd !== null) tTotal.usd = (tTotal.usd || 0) + finalUsd;
-        tOrigens.push(finalOrigem);
-      }
-    };
-
-    processarDir(ld);
-    if (fs.existsSync(ldFix)) processarDir(ldFix);
-
-    tTotal.usd = arred(tTotal.usd);
-    tTotal.brl = tTotal.usd !== null ? emBrl(tabela, tTotal.usd) : null;
-    tTotal.origem = piorOrigem(tOrigens);
-    tTotal.aproximado = tOrigens.some((o) => o === 'aproximado' || o === 'estimado');
-
-    tarefasOut.push({
-      id: t.id,
-      titulo: t.titulo || '',
-      estado: tState,
-      total: tTotal,
-      tentativas: tentativasTarefa
-    });
-  }
-
-  // 3. Totais do projeto e agregação por modelo
-  const projTotal = { entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0, usd: 0, brl: 0, aproximado: false, origem: 'cli' };
-  const projOrigens = [];
-  const modelosMap = new Map();
-
-  for (const tf of tarefasOut) {
-    projTotal.entrada += tf.total.entrada;
-    projTotal.saida += tf.total.saida;
-    projTotal.cacheLido += tf.total.cacheLido;
-    projTotal.cacheGravado += tf.total.cacheGravado;
-    if (tf.total.usd !== null) projTotal.usd = (projTotal.usd || 0) + tf.total.usd;
-    if (tf.total.origem) projOrigens.push(tf.total.origem);
-
-    for (const tent of tf.tentativas) {
-      const linhas = Array.isArray(tent.porModelo) && tent.porModelo.length ? tent.porModelo : [{
-        provedor: tent.provedor,
-        modelo: tent.modelo,
-        entrada: tent.entrada,
-        saida: tent.saida,
-        cacheLido: tent.cacheLido,
-        cacheGravado: tent.cacheGravado,
-        usd: tent.usd,
-        origem: tent.origem
-      }];
-
-      for (const l of linhas) {
-        const chave = `${l.provedor}:${l.modelo}`;
-        let mEntry = modelosMap.get(chave);
-        if (!mEntry) {
-          mEntry = {
-            provedor: l.provedor,
-            modelo: l.modelo,
-            entrada: 0,
-            saida: 0,
-            cacheLido: 0,
-            cacheGravado: 0,
-            usd: 0,
-            origens: [],
-            fontes: [],
-            assinatura: assinaturaDe(l.provedor)
-          };
-          modelosMap.set(chave, mEntry);
-        }
-        mEntry.entrada += l.entrada;
-        mEntry.saida += l.saida;
-        mEntry.cacheLido += l.cacheLido;
-        mEntry.cacheGravado += l.cacheGravado;
-        mEntry.origens.push(l.origem || tent.origem);
-        mEntry.fontes.push(tent.fonte);
-        if (l.usd !== null) mEntry.usd = (mEntry.usd || 0) + l.usd;
-      }
-    }
-  }
-
-  projTotal.usd = arred(projTotal.usd);
-  projTotal.brl = projTotal.usd !== null ? emBrl(tabela, projTotal.usd) : null;
-  projTotal.origem = piorOrigem(projOrigens);
-  projTotal.aproximado = projOrigens.some((o) => o === 'aproximado' || o === 'estimado');
-
-  const modelosOut = Array.from(modelosMap.values()).map((m) => {
-    const usd = arred(m.usd);
-    return {
-      provedor: m.provedor,
-      modelo: m.modelo,
-      entrada: m.entrada,
-      saida: m.saida,
-      cacheLido: m.cacheLido,
-      cacheGravado: m.cacheGravado,
-      usd,
-      brl: usd !== null ? emBrl(tabela, usd) : null,
-      origem: piorOrigem(m.origens),
-      assinatura: m.assinatura,
-      estimado: m.origens.some((o) => o === 'estimado') || m.fontes.some((f) => f === 'estimado')
-    };
-  }).sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0) || (b.entrada + b.saida) - (a.entrada + a.saida));
-
-  const emAndamento = p.estado === 'executando' || tarefasOut.some((t) => t.estado === 'running');
-
-  return {
-    emAndamento,
-    total: projTotal,
-    modelos: modelosOut,
-    tarefas: tarefasOut
-  };
+  return dadosUsoProjetoComRodadas(p, {
+    projDir: pdir(p.id),
+    dataDir: DATA,
+    tabela: tabela || carregarPrecos({ dataDir: DATA }),
+    usoAgyReal: (proj, taskId, entry, pf, ini, fim, rod) => usoAgyReal(proj, taskId, entry, pf, ini, fim, rod)
+  });
 }
 
 function dadosUsoPublico(p, tabela) {
@@ -1194,36 +997,120 @@ function dadosUsoPublico(p, tabela) {
     id: tf.id,
     titulo: tf.titulo,
     estado: tf.estado,
+    ...(tf.rodada ? { rodada: tf.rodada } : {}),
     total: tf.total,
     tentativas: tf.tentativas.map(({ porModelo: _pm, ...rest }) => rest)
+  }));
+  const rodadas = (dados.rodadas || []).map((r) => ({
+    ...r,
+    tarefas: (r.tarefas || []).map(({ tentativas, ...rest }) => ({
+      ...rest,
+      tentativas: (tentativas || []).map(({ porModelo: _pm, ...tRest }) => tRest)
+    }))
   }));
   return {
     emAndamento: dados.emAndamento,
     total: dados.total,
     modelos: dados.modelos,
-    tarefas
+    tarefas,
+    rodadas
   };
 }
 
-function noPeriodo(dtStr, periodo, agora = new Date()) {
-  if (periodo === 'tudo') return true;
+export function parseFiltroUso(searchParams, agora = new Date()) {
+  if (!searchParams || typeof searchParams.has !== 'function') {
+    return { ok: false, erro: 'período inválido' };
+  }
+
+  const hasMes = searchParams.has('mes');
+  const hasDe = searchParams.has('de');
+  const hasAte = searchParams.has('ate');
+
+  if (hasMes) {
+    if (hasDe || hasAte) return { ok: false, erro: 'período inválido' };
+    const mesStr = searchParams.get('mes');
+    if (!mesStr || !/^\d{4}-(0[1-9]|1[0-2])$/.test(mesStr)) {
+      return { ok: false, erro: 'período inválido' };
+    }
+    const [anoStr, mesNumStr] = mesStr.split('-');
+    const ano = Number(anoStr);
+    const mes = Number(mesNumStr);
+    const inicioMs = new Date(ano, mes - 1, 1, 0, 0, 0, 0).getTime();
+    const fimMs = new Date(ano, mes, 1, 0, 0, 0, 0).getTime() - 1;
+    return { ok: true, tipo: 'mes', rotulo: mesStr, inicioMs, fimMs };
+  }
+
+  if (hasDe || hasAte) {
+    const de = searchParams.has('de') ? searchParams.get('de') : null;
+    const ate = searchParams.has('ate') ? searchParams.get('ate') : null;
+
+    const validarData = (str) => {
+      if (!str || typeof str !== 'string') return null;
+      if (!/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(str)) return null;
+      const [y, m, d] = str.split('-').map(Number);
+      const dt = new Date(y, m - 1, d);
+      if (dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d) {
+        return { y, m, d };
+      }
+      return null;
+    };
+
+    let inicioMs = -Infinity;
+    let fimMs = Infinity;
+
+    if (de !== null) {
+      const v = validarData(de);
+      if (!v) return { ok: false, erro: 'período inválido' };
+      inicioMs = new Date(v.y, v.m - 1, v.d, 0, 0, 0, 0).getTime();
+    }
+    if (ate !== null) {
+      const v = validarData(ate);
+      if (!v) return { ok: false, erro: 'período inválido' };
+      fimMs = new Date(v.y, v.m - 1, v.d, 23, 59, 59, 999).getTime();
+    }
+
+    if (de !== null && ate !== null && inicioMs > fimMs) {
+      return { ok: false, erro: 'período inválido' };
+    }
+
+    const rotulo = de && ate ? `${de} a ${ate}` : (de ? `desde ${de}` : `até ${ate}`);
+    return { ok: true, tipo: 'intervalo', rotulo, inicioMs, fimMs };
+  }
+
+  const periodo = searchParams.has('periodo') ? searchParams.get('periodo') : '30d';
+  if (!['hoje', '7d', '30d', 'tudo'].includes(periodo)) {
+    return { ok: false, erro: 'período inválido' };
+  }
+  return { ok: true, tipo: 'predefinido', rotulo: periodo, periodo };
+}
+
+export function noPeriodo(dtStr, filtroOuPeriodo, agora = new Date()) {
+  const per = typeof filtroOuPeriodo === 'string' ? filtroOuPeriodo : filtroOuPeriodo?.periodo;
+  if (per === 'tudo') return true;
   if (!dtStr) return false;
   const t = new Date(dtStr).getTime();
   if (Number.isNaN(t)) return false;
-  if (periodo === 'hoje') {
+
+  if (typeof filtroOuPeriodo === 'object' && filtroOuPeriodo !== null) {
+    if (filtroOuPeriodo.inicioMs !== undefined && filtroOuPeriodo.fimMs !== undefined) {
+      return t >= filtroOuPeriodo.inicioMs && t <= filtroOuPeriodo.fimMs;
+    }
+  }
+
+  if (per === 'hoje') {
     const inicioHoje = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate()).getTime();
     return t >= inicioHoje;
   }
-  if (periodo === '7d') {
+  if (per === '7d') {
     return t >= agora.getTime() - 7 * 86400000;
   }
-  if (periodo === '30d') {
+  if (per === '30d') {
     return t >= agora.getTime() - 30 * 86400000;
   }
   return false;
 }
 
-function respostaUsoGeral(periodo, tabela) {
+export function respostaUsoGeral(filtroOuPeriodo, tabela) {
   tabela = tabela || carregarPrecos({ dataDir: DATA });
   const todos = listAll();
   const modelosMap = new Map();
@@ -1239,7 +1126,7 @@ function respostaUsoGeral(periodo, tabela) {
     for (const tf of dados.tarefas) {
       for (const tent of tf.tentativas) {
         const dataRef = tent.fim || tent.inicio;
-        if (!noPeriodo(dataRef, periodo, agora)) continue;
+        if (!noPeriodo(dataRef, filtroOuPeriodo, agora)) continue;
         projetoTeveNoPeriodo = true;
 
         totGeral.entrada += tent.entrada;
@@ -1312,8 +1199,12 @@ function respostaUsoGeral(periodo, tabela) {
     };
   }).sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0) || (b.entrada + b.saida) - (a.entrada + a.saida));
 
+  const rotuloPeriodo = typeof filtroOuPeriodo === 'object' && filtroOuPeriodo !== null
+    ? (filtroOuPeriodo.rotulo ?? filtroOuPeriodo.periodo)
+    : filtroOuPeriodo;
+
   return {
-    periodo,
+    periodo: rotuloPeriodo,
     precosAtualizados: tabela.atualizado || null,
     usdBrl: tabela.usdBrl ?? null,
     modelos,
@@ -1326,11 +1217,13 @@ function respostaUsoGeral(periodo, tabela) {
 // ---------- resumo final ----------
 // Texto para a conversa e o relatório: o que cada tarefa entregou, com qual modelo, trocas, falhas e commits.
 function resumoFinal(p, run) {
+  run = run || readRun(p);
   const L = [`Resumo da execução (${p.estado === 'concluido' ? 'concluída' : 'incompleta'}):`];
   const logs = path.join(pdir(p.id), 'logs');
   const tabela = carregarPrecos({ dataDir: DATA });
   const usoProj = dadosUsoDoProjeto(p, tabela);
-  const mapaTarefas = Object.fromEntries(usoProj.tarefas.map((t) => [t.id, t]));
+  const rodadaAtual = usoProj.rodadas?.[usoProj.rodadas.length - 1];
+  const mapaTarefas = Object.fromEntries((rodadaAtual?.tarefas || usoProj.tarefas).map((t) => [t.id, t]));
 
   for (const t of p.plano?.tarefas || []) {
     const st = run.status?.[t.id] || {};
@@ -1349,7 +1242,12 @@ function resumoFinal(p, run) {
 
     const ultimo = tent.length ? tent[tent.length - 1].text : null;
     let txt = '';
-    try { if (ultimo) txt = fs.readFileSync(ultimo, 'utf8').trim(); } catch {}
+    try {
+      if (ultimo) {
+        const arq = fs.existsSync(ultimo) ? ultimo : path.join(logs, t.id, path.basename(ultimo));
+        if (fs.existsSync(arq)) txt = fs.readFileSync(arq, 'utf8').trim();
+      }
+    } catch {}
     if (txt) L.push('  ' + (txt.length > 700 ? txt.slice(0, 700) + '…' : txt).replace(/\n+/g, '\n  '));
   }
   if (isGitRepo(p.repo) && p.inicio) {
@@ -1366,10 +1264,27 @@ function resumoFinal(p, run) {
     const brlStr = u.brl !== null ? ` (R$ ${u.brl.toFixed(2)})` : '';
     L.push('', `Planejador: tokens: entrada ${u.entrada}, saida ${u.saida}, cache lido ${u.cacheLido}, cache gravado ${u.cacheGravado} · ~US$ ${usdStr}${brlStr} (${u.origem})`);
   }
-  const tot = usoProj.total;
-  const totUsdStr = tot.usd !== null ? tot.usd.toFixed(4) : '-';
-  const totBrlStr = tot.brl !== null ? ` (R$ ${tot.brl.toFixed(2)})` : '';
-  L.push(`Total da execucao: tokens: entrada ${tot.entrada}, saida ${tot.saida}, cache lido ${tot.cacheLido}, cache gravado ${tot.cacheGravado} · ~US$ ${totUsdStr}${totBrlStr} (${tot.origem})`);
+
+  const totAtual = rodadaAtual?.total || usoProj.total;
+  const totAtualUsdStr = totAtual.usd !== null ? totAtual.usd.toFixed(4) : '-';
+  const totAtualBrlStr = totAtual.brl !== null ? ` (R$ ${totAtual.brl.toFixed(2)})` : '';
+  const rotuloExec = (usoProj.rodadas?.length || 0) > 1 ? `Total da execucao (rodada ${rodadaAtual?.numero || usoProj.rodadas.length})` : 'Total da execucao';
+  L.push(`${rotuloExec}: tokens: entrada ${totAtual.entrada}, saida ${totAtual.saida}, cache lido ${totAtual.cacheLido}, cache gravado ${totAtual.cacheGravado} · ~US$ ${totAtualUsdStr}${totAtualBrlStr} (${totAtual.origem})`);
+
+  if ((usoProj.rodadas?.length || 0) > 1) {
+    L.push('', 'Totais por rodada:');
+    for (const r of usoProj.rodadas) {
+      const u = r.total;
+      const uUsd = u.usd !== null ? u.usd.toFixed(4) : '-';
+      const uBrl = u.brl !== null ? ` (R$ ${u.brl.toFixed(2)})` : '';
+      L.push(`  Rodada ${r.numero}: entrada ${u.entrada}, saida ${u.saida}, cache lido ${u.cacheLido}, cache gravado ${u.cacheGravado} · ~US$ ${uUsd}${uBrl} (${u.origem})`);
+    }
+    const tot = usoProj.total;
+    const totUsdStr = tot.usd !== null ? tot.usd.toFixed(4) : '-';
+    const totBrlStr = tot.brl !== null ? ` (R$ ${tot.brl.toFixed(2)})` : '';
+    L.push('', `Total acumulado do projeto (${usoProj.rodadas.length} rodadas): tokens: entrada ${tot.entrada}, saida ${tot.saida}, cache lido ${tot.cacheLido}, cache gravado ${tot.cacheGravado} · ~US$ ${totUsdStr}${totBrlStr} (${tot.origem})`);
+  }
+
   L.push('Claude Code e Antigravity sao assinaturas: o custo e o equivalente em API.');
 
   return L.join('\n');
@@ -1406,6 +1321,20 @@ function report(p, run) {
     const tabela = carregarPrecos({ dataDir: DATA });
     const dadosUso = dadosUsoDoProjeto(p, tabela);
     L.push('## Tokens e custo', '');
+    if ((dadosUso.rodadas?.length || 0) > 1) {
+      L.push('### Por rodada', '',
+        '| Rodada | Estado | Entrada | Saída | Cache lido | Cache gravado | Custo (US$) | Custo (R$) | Origem |',
+        '|---|---|---|---|---|---|---|---|---|');
+      for (const r of dadosUso.rodadas) {
+        const u = r.total.usd !== null ? r.total.usd.toFixed(4) : '-';
+        const b = r.total.brl !== null ? r.total.brl.toFixed(2) : '-';
+        L.push(`| Rodada ${r.numero} | ${esc(r.estado || '-')} | ${r.total.entrada} | ${r.total.saida} | ${r.total.cacheLido} | ${r.total.cacheGravado} | ${esc(u)} | ${esc(b)} | ${esc(r.total.origem)} |`);
+      }
+      const t = dadosUso.total;
+      const tu = t.usd !== null ? t.usd.toFixed(4) : '-';
+      const tb = t.brl !== null ? t.brl.toFixed(2) : '-';
+      L.push(`| **Total** | - | **${t.entrada}** | **${t.saida}** | **${t.cacheLido}** | **${t.cacheGravado}** | **${esc(tu)}** | **${esc(tb)}** | **${esc(t.origem || '-')}** |`, '');
+    }
     if (dadosUso.modelos.length) {
       L.push('### Por modelo', '',
         '| Modelo | Provedor | Entrada | Saída | Cache lido | Cache gravado | Custo (US$) | Custo (R$) | Origem | Assinatura |',
@@ -1427,10 +1356,31 @@ function report(p, run) {
       for (const tf of dadosUso.tarefas) {
         const u = tf.total.usd !== null ? tf.total.usd.toFixed(4) : '-';
         const b = tf.total.brl !== null ? tf.total.brl.toFixed(2) : '-';
+        const pref = tf.rodada ? `R${tf.rodada} · ` : '';
         const tit = tf.titulo ? `: ${esc(tf.titulo)}` : '';
-        L.push(`| ${esc(tf.id)}${tit} | ${tf.total.entrada} | ${tf.total.saida} | ${tf.total.cacheLido} | ${tf.total.cacheGravado} | ${esc(u)} | ${esc(b)} | ${esc(tf.total.origem)} |`);
+        L.push(`| ${esc(pref + tf.id)}${tit} | ${tf.total.entrada} | ${tf.total.saida} | ${tf.total.cacheLido} | ${tf.total.cacheGravado} | ${esc(u)} | ${esc(b)} | ${esc(tf.total.origem)} |`);
       }
       L.push('', '*Claude Code e Antigravity são assinaturas: o custo é o equivalente em API.*', '');
+    }
+
+    if (Array.isArray(p.rodadas) && p.rodadas.length > 0) {
+      L.push('## Rodadas anteriores', '');
+      for (const r of p.rodadas) {
+        L.push(`### Rodada ${r.numero}: ${esc(r.titulo || 'Sem título')}`);
+        L.push(`- **Estado:** ${r.estado || '-'} · **Início:** ${r.inicio || '-'} · **Fim:** ${r.fim || '-'}`);
+        if (r.plano?.resumo) L.push(`- **Resumo do plano:** ${r.plano.resumo}`);
+        const stEntries = Object.entries(r.status || {});
+        if (stEntries.length) {
+          L.push('', '| Tarefa | Estado | Modelo usado | Nota |', '|---|---|---|---|');
+          for (const [k, v] of stEntries) {
+            L.push(`| ${esc(k)} | ${esc(v?.state || '-')} | ${esc(v?.model || '-')} | ${esc(v?.note || '-')} |`);
+          }
+          L.push('');
+        }
+        if (r.resumoFinal) {
+          L.push('**Resumo da rodada:**', '```', r.resumoFinal, '```', '');
+        }
+      }
     }
 
     if (p.resumoFinal) L.push('## Resumo', '', '```', p.resumoFinal, '```', '');
@@ -1489,7 +1439,7 @@ const safeEq = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(Str
 
 function modoPublico(p) {
   const m = cfgDe(p);
-  return { planner: m.planner, tiers: m.tiers, fix: m.fix, coord: m.coord, maxConcurrent: m.maxConcurrent, base: m.base || null };
+  return { planner: m.planner, tiers: m.tiers, fix: m.fix, coord: m.coord, maxConcurrent: m.maxConcurrent, base: m.base || null, semGratuitos: !!m.semGratuitos };
 }
 // Projeto que roda ou cujo planejador responde não pode ser arquivado nem excluído.
 function ocupadoDemais(p) { return p.estado === 'executando' || !!p.ocupado || !!(p.pid && alive(p.pid)); }
@@ -1499,7 +1449,10 @@ function desarquivarSePreciso(p) {
   evento(p, { tipo: 'projeto', texto: 'desarquivado' });
 }
 function publicView(p, full) {
-  const v = { id: p.id, titulo: p.titulo, modo: p.modo, modoNome: nomeModo(p), velocidade: velDe(p), supervisao: supDe(p), estado: p.estado, auto: p.auto, repo: p.repo, criado: p.criado, inicio: p.inicio, fim: p.fim, ocupado: !!p.ocupado, arquivado: !!p.arquivado, perfil: p.perfil || null };
+  if ((!Array.isArray(p.rodadas) || !p.rodadas.length) && fs.existsSync(path.join(pdir(p.id), 'rodadas'))) {
+    migrarRodadas(p, { projDir: pdir(p.id), dataDir: DATA, gravar: !ocupadoDemais(p) });
+  }
+  const v = { id: p.id, titulo: p.titulo, modo: p.modo, modoNome: nomeModo(p), velocidade: velDe(p), supervisao: supDe(p), estado: p.estado, auto: p.auto, repo: p.repo, criado: p.criado, inicio: p.inicio, fim: p.fim, ocupado: !!p.ocupado, arquivado: !!p.arquivado, perfil: p.perfil || null, rodadas: Array.isArray(p.rodadas) ? p.rodadas.length : 0 };
   if (!full) { v.gates = p.estado === 'executando' ? gatesPendentes(p).length : 0; return v; }
   v.pedido = p.pedido; v.mensagens = p.mensagens; v.planejador = p.planejador || null;
   v.config = modoPublico(p); v.plannerEfetivo = adaptar(cfgDe(p).planner);
@@ -1509,6 +1462,19 @@ function publicView(p, full) {
   }
   v.run = readRun(p);
   v.relatorio = path.join(VAULT, 'orquestracao', `${p.id}.md`);
+  if (Array.isArray(p.rodadas) && p.rodadas.length > 0) {
+    const dadosUso = dadosUsoDoProjeto(p);
+    const mapaUso = Object.fromEntries((dadosUso.rodadas || []).map((r) => [r.numero, r]));
+    v.rodadas = p.rodadas.map((r) => {
+      const u = mapaUso[r.numero];
+      return {
+        ...r,
+        uso: u ? { total: u.total, modelos: u.modelos, tarefas: u.tarefas } : (r.uso || null),
+      };
+    });
+  } else {
+    v.rodadas = [];
+  }
   return v;
 }
 
@@ -1626,14 +1592,22 @@ function atualizarCotasSePreciso() {
 }
 function respostaCotas(aviso = null) {
   const c = lerCache();
+  if (c) registrarHistoricoCota(DATA, c);
   const idade = idadeCacheMin(c);
   const prov = Object.fromEntries(Object.entries(detectar()).map(([k, v]) => [k, !!v])); // só se existe, nunca o caminho da CLI
   const t = c && typeof c.time === 'string' ? new Date(c.time) : null;
+  const historico = lerHistoricoCotas(DATA);
+  const tentativas = coletarTentativasUso(listAll(), { dataDir: DATA, dadosUsoProjeto: (proj) => dadosUsoDoProjeto(proj) });
+  const estimativas = estimarTokensPorCota(historico, tentativas);
+  const linhas = linhasDeCotas(c, prov).map((l) => ({
+    ...l,
+    estimativa: l.chave === 'opencode' ? null : (estimativas[l.chave] || null),
+  }));
   return {
     lidoEm: t && !Number.isNaN(t.getTime()) ? t.toISOString() : null,
     idadeMin: idade === null ? null : Math.round(idade),
     lendo: lendoCotas(), erro: erroLeitura, aviso,
-    linhas: linhasDeCotas(c, prov), provedores: prov,
+    linhas, provedores: prov,
   };
 }
 async function rotaCotas(req, res, parts) {
@@ -1662,11 +1636,19 @@ function cotasDoProjetoView(p) {
   }
   atualizarCotasSePreciso();
   const c = lerCache();
+  if (c) registrarHistoricoCota(DATA, c);
   const t = c && typeof c.time === 'string' ? new Date(c.time) : null;
+  const historico = lerHistoricoCotas(DATA);
+  const tentativas = coletarTentativasUso(listAll(), { dataDir: DATA, dadosUsoProjeto: (proj) => dadosUsoDoProjeto(proj) });
+  const estimativas = estimarTokensPorCota(historico, tentativas);
+  const linhas = cotasDoProjeto(linhasDeCotas(c, detectar()), entradas, atuais).map((l) => ({
+    ...l,
+    estimativa: l.chave === 'opencode' ? null : (estimativas[l.chave] || null),
+  }));
   return {
     lidoEm: t && !Number.isNaN(t.getTime()) ? t.toISOString() : null,
     lendo: lendoCotas(), erro: erroLeitura,
-    linhas: cotasDoProjeto(linhasDeCotas(c, detectar()), entradas, atuais),
+    linhas,
   };
 }
 
@@ -1683,10 +1665,10 @@ async function api(req, res, url) {
   if (parts[1] === 'uso') {
     if (parts.length > 2) return send(res, 404, { erro: 'não encontrado' });
     if (req.method !== 'GET') return send(res, 405, { erro: 'método não permitido' });
-    const periodo = url.searchParams.has('periodo') ? url.searchParams.get('periodo') : '30d';
-    if (!['hoje', '7d', '30d', 'tudo'].includes(periodo)) return send(res, 400, { erro: 'período inválido' });
+    const filtro = parseFiltroUso(url.searchParams);
+    if (!filtro.ok) return send(res, 400, { erro: 'período inválido' });
     const tabela = carregarPrecos({ dataDir: DATA });
-    return send(res, 200, respostaUsoGeral(periodo, tabela));
+    return send(res, 200, respostaUsoGeral(filtro, tabela));
   }
   if (parts[1] === 'precos') {
     const sub = parts[2];
@@ -1775,6 +1757,7 @@ async function api(req, res, url) {
       if (!t || t.length > 50000) return send(res, 400, { erro: 'mensagem vazia' });
       if (p.ocupado) return busy();
       if (running) return send(res, 409, { erro: 'execução em andamento' });
+      if (['concluido', 'cancelado'].includes(p.estado) || temRodadaExecutada(p, pdir(p.id))) arquivarRodadaSePreciso(p);
       p.mensagens.push({ papel: 'usuario', texto: t, quando: now() }); save(p);
       plannerTurn(p, t).catch((e) => console.error(e));
       return send(res, 202, { ok: true });
@@ -1783,12 +1766,36 @@ async function api(req, res, url) {
       desarquivarSePreciso(p);
       if (p.ocupado) return busy();
       if (running) return send(res, 409, { erro: 'execução em andamento' });
+      if (['concluido', 'cancelado'].includes(p.estado) || temRodadaExecutada(p, pdir(p.id))) arquivarRodadaSePreciso(p);
       p.mensagens.push({ papel: 'usuario', texto: '(pediu o plano final)', quando: now() }); save(p);
       plannerTurn(p, 'Gere o plano final.', { gerar: true }).catch((e) => console.error(e));
       return send(res, 202, { ok: true });
     }
     case 'ajustes': {
-      if (running && (b.modo != null || b.perfil != null || b.niveis != null || b.esforcos != null || typeof b.auto === 'boolean' || b.velocidade != null)) return send(res, 409, { erro: 'execução em andamento' });
+      if (running && (b.modo != null || b.perfil != null || b.niveis != null || b.esforcos != null || typeof b.auto === 'boolean' || b.velocidade != null || b.cadeias != null)) return send(res, 409, { erro: 'execução em andamento' });
+      if (b.cadeias != null) {
+        if (!b.cadeias || typeof b.cadeias !== 'object' || Array.isArray(b.cadeias)) return send(res, 400, { erro: 'cadeia inválida' });
+        for (const [, cad] of Object.entries(b.cadeias)) {
+          const limpar = cad === null || (Array.isArray(cad) && cad.length === 0);
+          if (!limpar) {
+            if (!Array.isArray(cad) || cad.length < 1 || cad.length > 8 || !cad.every(entradaValida)) {
+              return send(res, 400, { erro: 'cadeia inválida' });
+            }
+          }
+        }
+        if (p.plano && Array.isArray(p.plano.tarefas)) {
+          for (const [tid, cad] of Object.entries(b.cadeias)) {
+            const t = p.plano.tarefas.find((item) => item.id === tid);
+            if (!t) continue;
+            const limpar = cad === null || (Array.isArray(cad) && cad.length === 0);
+            if (limpar) {
+              delete t.cadeia;
+            } else {
+              t.cadeia = [...cad];
+            }
+          }
+        }
+      }
       if (b.velocidade != null) {
         if (!temVel(b.velocidade)) return send(res, 400, { erro: 'velocidade inválida' });
         p.velocidade = b.velocidade;
@@ -1848,6 +1855,12 @@ async function api(req, res, url) {
       evento(p, { tipo: 'cancelado', texto: 'execução cancelada pelo usuário' });
       return send(res, 200, publicView(p, true));
     }
+    case 'migrar-rodadas': {
+      if (running || ocupadoDemais(p)) return send(res, 409, { erro: 'execução em andamento; aguarde terminar para migrar as rodadas' });
+      const r = migrarRodadas(p, { projDir: pdir(p.id), dataDir: DATA, tabela: carregarPrecos({ dataDir: DATA }), gravar: true });
+      if (r.migrado) { save(p); report(p); }
+      return send(res, 200, publicView(p, true));
+    }
   }
   return send(res, 404, { erro: 'ação desconhecida' });
 }
@@ -1855,6 +1868,7 @@ async function api(req, res, url) {
 const STATIC = { '/': 'index.html', '/painel.js': 'painel.js', '/style.css': 'style.css', '/fluxo.js': 'fluxo.js', '/fluxo.css': 'fluxo.css' };
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
 const server = http.createServer(async (req, res) => {
+  if (!ehLoopback(req.socket?.remoteAddress)) return send(res, 403, { erro: 'acesso só deste computador' });
   const host = String(req.headers.host || '');
   if (host !== `127.0.0.1:${PORT}` && host !== `localhost:${PORT}`) return send(res, 421, { erro: 'host não permitido' });
   try {
@@ -1879,6 +1893,11 @@ for (const p of listAll()) if (p.ocupado) { p.ocupado = false; p.mensagens.push(
 detectar();
 setInterval(poll, 10000);
 server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `porta ${PORT} já em uso; outro painel está no ar` : e); process.exit(1); });
+const checagemHost = validarHostEscuta();
+if (!checagemHost.ok) {
+  console.error(checagemHost.erro);
+  process.exit(1);
+}
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Delegar em http://127.0.0.1:${PORT} (pid ${process.pid}) · provedores: ${Object.entries(detectar()).filter(([, v]) => v).map(([k]) => k).join(', ') || 'nenhum'}`);
   // Descoberta de modelos em segundo plano: o painel já responde enquanto ela roda.

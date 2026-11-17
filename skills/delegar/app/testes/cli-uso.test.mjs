@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatarUso, formatarPrecos } from '../cli.mjs';
+import { formatarUso, formatarPrecos, formatarCotas } from '../cli.mjs';
 
 test('formatarPrecos: alinhamento, formatação de números, idade e null vira -', () => {
   const dados = {
@@ -242,4 +242,115 @@ test('formatarUso (modo projeto): lista o planejador primeiro e detalha tarefas'
 
   // Nota de assinatura
   assert.ok(texto.includes('Claude Code e Antigravity sao assinaturas: valores sao o equivalente em API.'));
+});
+
+test('formatarUso (modo projeto): com 2+ rodadas mostra seção Rodadas e prefixa tarefas com Rn; com 1 rodada fica idêntico ao atual', () => {
+  const rodadas = [
+    {
+      numero: 1,
+      titulo: 'Primeira rodada',
+      estado: 'done',
+      uso: { total: { entrada: 1000, saida: 500, cacheLido: 100, cacheGravado: 0, usd: 0.01, brl: 0.056, origem: 'cli' } }
+    },
+    {
+      numero: 2,
+      titulo: 'Segunda rodada',
+      estado: 'running',
+      total: { entrada: 2000, saida: 800, cacheLido: 200, cacheGravado: 0, usd: 0.02, brl: 0.112, origem: 'cli' }
+    }
+  ];
+
+  const dados = {
+    usdBrl: 5.61,
+    total: { entrada: 3000, saida: 1300, cacheLido: 300, cacheGravado: 0, usd: 0.03, brl: 0.168, origem: 'cli' },
+    modelos: [],
+    rodadas,
+    tarefas: [
+      { id: 'w1', titulo: 'W um', rodada: 1, estado: 'done', total: { entrada: 1000, saida: 500, cacheLido: 100, cacheGravado: 0, usd: 0.01, brl: 0.056, origem: 'cli' } },
+      { id: 'planejador', titulo: 'Planejador', rodada: 2, estado: 'running', total: { entrada: 500, saida: 300, cacheLido: 100, cacheGravado: 0, usd: 0.005, brl: 0.028, origem: 'cli' } },
+      { id: 'w1', titulo: 'W um', rodada: 2, estado: 'running', total: { entrada: 1500, saida: 500, cacheLido: 200, cacheGravado: 0, usd: 0.015, brl: 0.084, origem: 'cli' } }
+    ]
+  };
+
+  const texto = formatarUso(dados, { projeto: true });
+  // Seção Rodadas
+  assert.ok(texto.includes('Rodadas:'));
+  assert.ok(texto.includes('Rodada 1 (Primeira rodada)'));
+  assert.ok(texto.includes('Rodada 2 (Segunda rodada)'));
+  // a API devolve o total da rodada em r.total (rodada 2 acima); a linha precisa trazer os números, não '-'
+  assert.ok(/Rodada 2 \(Segunda rodada\)\s+\S+\s+2\.000\s+800/.test(texto), texto);
+  assert.ok(texto.includes('1.000') && texto.includes('concluída'));
+  assert.ok(texto.includes('2.000') && texto.includes('rodando'));
+  // Tarefas prefixadas com a rodada
+  assert.ok(texto.includes('R1/w1 (W um)'));
+  assert.ok(texto.includes('R2/w1 (W um)'));
+  assert.ok(texto.includes('R2/planejador (Planejador)'));
+  // Total do projeto permanece
+  assert.ok(texto.includes('Total do projeto: 3.000 entrada'));
+
+  // Com apenas uma rodada, sem seção Rodadas e sem prefixo
+  const umaRodada = {
+    usdBrl: 5.61,
+    total: { entrada: 3000, saida: 1300, cacheLido: 300, cacheGravado: 0, usd: 0.03, brl: 0.168, origem: 'cli' },
+    modelos: [],
+    rodadas: [rodadas[0]],
+    tarefas: [{ id: 'w1', titulo: 'W um', rodada: 1, estado: 'done', total: { entrada: 1000, saida: 500, cacheLido: 100, cacheGravado: 0, usd: 0.01, brl: 0.056, origem: 'cli' } }]
+  };
+  const textoUma = formatarUso(umaRodada, { projeto: true });
+  assert.ok(!textoUma.includes('Rodadas:'));
+  assert.ok(textoUma.includes('w1 (W um)'));
+  assert.ok(!textoUma.includes('R1/w1'));
+});
+
+test('formatarUso (geral): aceita periodo com mes específico e intervalo de datas', () => {
+  const usoMes = {
+    periodo: '2026-10',
+    projetos: 1,
+    total: { entrada: 700, saida: 300, cacheLido: 0, cacheGravado: 0, usd: 0.007, brl: null, origem: 'cli' },
+    modelos: []
+  };
+  const txtMes = formatarUso(usoMes, { projeto: false });
+  assert.ok(txtMes.includes('Período: 2026-10 (1 projeto)'));
+
+  const usoIntervalo = {
+    periodo: '2026-10-01 a 2026-10-31',
+    projetos: 2,
+    total: { entrada: 810, saida: 350, cacheLido: 0, cacheGravado: 0, usd: 0.0081, brl: null, origem: 'cli' },
+    modelos: []
+  };
+  const txtIntervalo = formatarUso(usoIntervalo, { projeto: false });
+  assert.ok(txtIntervalo.includes('Período: 2026-10-01 a 2026-10-31 (2 projetos)'));
+});
+
+test('formatarCotas: inclui coluna 1% da cota e nota de estimativa no final', () => {
+  const dados = {
+    lidoEm: '2026-11-16T12:00:00.000Z',
+    idadeMin: 5,
+    linhas: [
+      {
+        chave: 'claude-5h',
+        nome: 'Claude',
+        janela: '5 h',
+        instalado: true,
+        restante: 0.85,
+        renovaEm: '2026-11-16T15:00:00.000Z',
+        lidoEm: '2026-11-16T12:00:00.000Z',
+        fonte: 'leitura',
+        estimativa: { texto: '1% ≈ 40 mil tokens de entrada / 5 mil de saída' },
+      },
+      {
+        chave: 'opencode',
+        nome: 'opencode (gratuitos)',
+        janela: null,
+        instalado: true,
+        restante: null,
+        estimativa: null,
+      },
+    ],
+  };
+
+  const txt = formatarCotas(dados);
+  assert.ok(txt.includes('1% da cota'));
+  assert.ok(txt.includes('1% ≈ 40 mil tokens de entrada / 5 mil de saída'));
+  assert.ok(txt.includes('Nota: a estimativa por 1% soma o consumo local da máquina'));
 });

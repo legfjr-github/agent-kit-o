@@ -1,0 +1,39 @@
+{
+  "concurso": "Exemplo: Analista Legislativo, banca Cebraspe, prova em 2027",
+  "pasta": "Concurso X 2027",
+  "formato": "OBJETIVA",
+  "padrao": {
+    "bancas": [4],
+    "anos": { "ultimos": 10 },
+    "remover": ["REMOVER_ANULADAS", "REMOVER_DESATUALIZADAS"],
+    "reserva": { "bancas": [125, 3], "minimo": 150 },
+    "alvo": 1000,
+    "tolerancia": 1.3
+  },
+  "cadernos": [
+    {
+      "nome": "01. [P2] Sistemas eleitorais e partidos",
+      "assuntos": [3915, 3925, 3187]
+    },
+    {
+      "nome": "02. [P2] Ciência Política",
+      "materias": [103]
+    },
+    {
+      "nome": "03. [P3] Discursivas",
+      "formato": "DISCURSIVA",
+      "materias": [103, 26],
+      "assuntos": [406, 3246],
+      "anos": null,
+      "reserva": { "bancas": [3, 5], "minimo": 30 }
+    }
+  ],
+  "_campos": {
+    "padrao.bancas": "banca(s) do concurso; um caderno pode ter 'bancas' próprio",
+    "padrao.anos": "{ultimos: 10} (padrão), {de, ate} ou lista de anos; null no caderno = sem filtro de ano",
+    "padrao.reserva": "bancas somadas quando o caderno ficar abaixo de 'minimo' questões",
+    "padrao.alvo": "acima de alvo*tolerancia, contarPlano encurta o período (um ano por vez) até o total mais próximo do alvo",
+    "materias/assuntos": "mesmo grupo de filtro no TEC: somam (OU)",
+    "extras": "lista opcional de {tipo, id} (ORGAO, CARGO, ...)"
+  }
+}

@@ -4,7 +4,7 @@ Kit para trabalhar com agentes de IA (Claude Code, Antigravity/Gemini, opencode,
 
 - **Cofre de conhecimento** (Markdown, compatível com Obsidian) que todos os agentes leem e atualizam: índice, log diário, próximos passos e notas por projeto.
 - **Orquestrador `delegar`**: um modelo forte planeja, modelos mais baratos executam em paralelo, com troca automática quando a cota acaba, modo com modelos gratuitos, paradas para confirmação e tela de atividade. Ajusta-se às CLIs instaladas no PC.
-- **Skills**: `delegar` (orquestrador), `knowledge-vault-manager` (cofre), `humanizer` (escrita sem cara de IA) e `sistemas-com-ia` (criar sistemas que usam IA pela API ou pelas CLIs locais) e `automacao-web` (robôs de navegador com undetected-chromedriver, que anotam o passo a passo de cada site no cofre para reaproveitar).
+- **Skills**: `delegar` (orquestrador), `knowledge-vault-manager` (cofre), `humanizer` (escrita sem cara de IA), `sistemas-com-ia` (criar sistemas que usam IA pela API ou pelas CLIs locais), `automacao-web` (robôs de navegador com undetected-chromedriver, que anotam o passo a passo de cada site no cofre para reaproveitar) e `tec-concursos` (assistente de filtros, cadernos e extração no TEC Concursos).
 - **Regras globais** para todas as IAs: como usar o kit, consulta e atualização do cofre, segurança por padrão, redação humana.
 - **Cofre de exemplo** com padrões prontos: checklist de segurança e testes de ataque, padrões de testes, sistemas com integração de IA, automação web e mapas de site (com o login gov.br), executáveis com Nuitka, interfaces com PyQt6, uso do orquestrador.
 

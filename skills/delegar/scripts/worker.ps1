@@ -12,8 +12,13 @@ param(
   # Handoff: while a Claude model works, read the Claude quota every N minutes; at HandoffAt (5-hour window)
   # or 0.95 (weekly) stop it and pass the task, with a summary of what was done, to the next non-Claude model.
   [double]$HandoffAt = 0.85,
-  [int]$QuotaCheckMinutes = 3
+  [int]$QuotaCheckMinutes = 3,
+  [switch]$NoFreeFallback,
+  [int]$IdleTimeoutMinutes = 20,
+  [int]$IdleTimeoutSeconds = 0
 )
+
+$idleLimitSec = if ($IdleTimeoutSeconds -gt 0) { $IdleTimeoutSeconds } elseif ($IdleTimeoutMinutes -gt 0) { $IdleTimeoutMinutes * 60 } else { 0 }
 
 $ErrorActionPreference = 'Continue'
 $Chain = @($Chain | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -71,8 +76,15 @@ function QuotaAll {
 }
 function ClaudeQuota { $q = QuotaAll; if ($q) { return $q.claude } else { return $null } }
 
+function EhGratuito($entry) {
+  if ($entry -like 'opencode:*' -and ($entry -match '-free(@|$)' -or $entry -match 'big-pickle(@|$)')) {
+    return $true
+  }
+  return $false
+}
+
 # Last quota hit of a provider in the ledger written by this script (any task, any project).
-function LastHit($kind) {
+function LastHit($kind, [string]$grp = '') {
   try {
     $dBase = if ($env:DELEGAR_DATA) { $env:DELEGAR_DATA } else { Join-Path $env:USERPROFILE '.delegar' }
     $f = Join-Path (Join-Path $dBase 'state') 'quota-ledger.jsonl'
@@ -80,7 +92,16 @@ function LastHit($kind) {
     $last = $null
     foreach ($l in @(Get-Content $f -Tail 50 -Encoding UTF8)) {
       try { $e = $l | ConvertFrom-Json } catch { continue }
-      if ([string]$e.worker -like "$($kind):*") { $last = [datetime]$e.time }
+      $match = $false
+      if ($kind -eq 'agy' -and $grp) {
+        if ($grp -eq 'agyClaudeGpt') { $match = [bool]($e.worker -match '^agy:(claude|gpt)') }
+        elseif ($grp -eq 'argon') { $match = [bool]($e.worker -match '^agy:.*argon') }
+        elseif ($grp -eq 'gemini') { $match = [bool]($e.worker -like 'agy:*' -and $e.worker -notmatch '^agy:(claude|gpt)' -and $e.worker -notmatch 'argon') }
+        else { $match = [bool]($e.worker -like 'agy:*') }
+      } else {
+        $match = [bool]([string]$e.worker -like "$($kind):*")
+      }
+      if ($match) { $last = [datetime]$e.time }
     }
     return $last
   } catch { return $null }
@@ -91,14 +112,14 @@ function LastHit($kind) {
 function SemCota($kind, $model) {
   if ($kind -eq 'opencode') { return $null }
   $q = QuotaAll
-  $hit = LastHit $kind
   if ($kind -eq 'claude') {
+    $hit = LastHit $kind
     $c = if ($q) { $q.claude } else { $null }
     if ($c -and $c.read) {
       if ([double]$c.fiveHour -ge $HandoffAt) { return "cota do Claude em $([Math]::Round([double]$c.fiveHour * 100))% na janela de 5 h (renova $($c.fiveHourResets))" }
       if ([double]$c.sevenDay -ge 0.95) { return "cota semanal do Claude em $([Math]::Round([double]$c.sevenDay * 100))%" }
       # a quota hit inside the current 5-hour window still counts while the window has not renewed
-      if ($hit -and $c.fiveHourResets -and ([datetime]$c.fiveHourResets) -gt (Get-Date) -and $hit -gt ([datetime]$c.fiveHourResets).AddHours(-5) -and $hit -gt [datetime]$c.readAt) { return "Claude estourou a cota as $($hit.ToString('HH:mm'))" }
+      if ($hit -and $c.fiveHourResets -and ([datetime]$c.fiveHourResets) -gt (Get-Date) -and $hit -gt ([datetime]$c.fiveHourResets).AddHours(-5) -and ($c.readAt -and $hit -gt [datetime]$c.readAt)) { return "Claude estourou a cota as $($hit.ToString('HH:mm'))" }
       return $null
     }
     if ($hit -and ((Get-Date) - $hit).TotalMinutes -lt 60) { return "Claude estourou a cota as $($hit.ToString('HH:mm')) (sem leitura nova)" }
@@ -106,15 +127,24 @@ function SemCota($kind, $model) {
   }
   if ($kind -eq 'agy') {
     $grp = if ($model -match 'argon') { 'argon' } elseif ($model -match '^(claude|gpt)') { 'agyClaudeGpt' } else { 'gemini' }
+    $hit = LastHit $kind $grp
     $g = if ($q) { $q.$grp } else { $null }
-    if ($g -and $g.read) {
+    $hasReading = $g -and ($g.read -or $g.exhausted -or $null -ne $g.fiveHourRemaining -or $null -ne $g.sevenDayRemaining)
+    if ($hasReading) {
+      if ($g.exhausted) { return "cota de $grp no Antigravity esgotada" }
       $r5 = if ($null -ne $g.fiveHourRemaining) { [double]$g.fiveHourRemaining } else { 1 }
       $r7 = if ($null -ne $g.sevenDayRemaining) { [double]$g.sevenDayRemaining } else { 1 }
       if ($r5 -le 0.03) { return "cota de $grp no Antigravity com $([Math]::Round($r5 * 100))% restante na janela de 5 h" }
       if ($r7 -le 0.03) { return "cota semanal de $grp no Antigravity com $([Math]::Round($r7 * 100))% restante" }
+      if ($hit -and $g.fiveHourResets -and ([datetime]$g.fiveHourResets) -gt (Get-Date) -and $hit -gt ([datetime]$g.fiveHourResets).AddHours(-5) -and ($g.readAt -and $hit -gt [datetime]$g.readAt)) {
+        return "Antigravity ($grp) estourou a cota as $($hit.ToString('HH:mm'))"
+      }
+      if ($hit -and ((Get-Date) - $hit).TotalMinutes -lt 60 -and (-not $g.readAt -or $hit -gt [datetime]$g.readAt)) {
+        return "Antigravity ($grp) estourou a cota as $($hit.ToString('HH:mm'))"
+      }
       return $null
     }
-    if ($hit -and ((Get-Date) - $hit).TotalMinutes -lt 60) { return "Antigravity estourou a cota as $($hit.ToString('HH:mm'))" }
+    if ($hit -and ((Get-Date) - $hit).TotalMinutes -lt 60) { return "Antigravity ($grp) estourou a cota as $($hit.ToString('HH:mm'))" }
   }
   return $null
 }
@@ -155,6 +185,70 @@ function UsoTentativa($kind, $entry, $outFile, $promptFile, $txtFile) {
   } catch { return $null }
 }
 
+# Watched process: monitors file changes and kills hung process on timeout or Claude handoff.
+function RunWatchedProcess($fileName, $argString, $stdinFile, $outFile, $errFile, $checkClaudeHandoff, $proximoIdx) {
+  $redir = if ($stdinFile) { "< `"$stdinFile`" > `"$outFile`" 2> `"$errFile`"" } else { "> `"$outFile`" 2> `"$errFile`"" }
+  $linha = "call `"$fileName`" $argString $redir"
+  $proc = Start-Process cmd.exe -ArgumentList "/d /s /c `"$linha`"" -WindowStyle Hidden -PassThru
+  $null = $proc.Handle
+
+  $pollMs = if ($idleLimitSec -gt 0) { [Math]::Min(5000, [Math]::Max(200, [int]($idleLimitSec * 250))) } else { 5000 }
+  $lastActivity = Get-Date
+
+  function Stat-File($p) {
+    if (-not $p -or -not (Test-Path -LiteralPath $p)) { return $null }
+    try {
+      $fi = New-Object IO.FileInfo($p)
+      return @{ len = $fi.Length; time = $fi.LastWriteTimeUtc.Ticks }
+    } catch { return $null }
+  }
+
+  $stOut = Stat-File $outFile
+  $stErr = Stat-File $errFile
+  $stEvt = Stat-File $eventsFile
+
+  $ultimaLeitura = Get-Date
+  $handoff = $null
+
+  while (-not $proc.WaitForExit($pollMs)) {
+    $curOut = Stat-File $outFile
+    $curErr = Stat-File $errFile
+    $curEvt = Stat-File $eventsFile
+    $changed = $false
+
+    if ($curOut -and (-not $stOut -or $curOut.len -ne $stOut.len -or $curOut.time -ne $stOut.time)) { $stOut = $curOut; $changed = $true }
+    if ($curErr -and (-not $stErr -or $curErr.len -ne $stErr.len -or $curErr.time -ne $stErr.time)) { $stErr = $curErr; $changed = $true }
+    if ($curEvt -and (-not $stEvt -or $curEvt.len -ne $stEvt.len -or $curEvt.time -ne $stEvt.time)) { $stEvt = $curEvt; $changed = $true }
+    if ($changed) { $lastActivity = Get-Date }
+
+    if ($idleLimitSec -gt 0 -and ((Get-Date) - $lastActivity).TotalSeconds -ge $idleLimitSec) {
+      & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null
+      Start-Sleep -Milliseconds 500
+      try { [void]$proc.WaitForExit(2000) } catch {}
+      return @{ code = -1; stalled = $true; handoff = $null }
+    }
+
+    if ($checkClaudeHandoff -and $proximoIdx -gt 0 -and ((Get-Date) - $ultimaLeitura).TotalMinutes -ge $QuotaCheckMinutes) {
+      $ultimaLeitura = Get-Date
+      $cq = ClaudeQuota
+      if ($cq -and $cq.read -and ([double]$cq.fiveHour -ge $HandoffAt -or [double]$cq.sevenDay -ge 0.95)) {
+        $handoff = "cota do Claude em $([Math]::Round([double]$cq.fiveHour * 100))% (5 h) / $([Math]::Round([double]$cq.sevenDay * 100))% (semana)"
+        & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null
+        Start-Sleep -Milliseconds 500
+        try { [void]$proc.WaitForExit(2000) } catch {}
+        return @{ code = $null; stalled = $false; handoff = $handoff }
+      }
+    }
+  }
+
+  $proc.WaitForExit()
+  return @{ code = $proc.ExitCode; stalled = $false; handoff = $null }
+}
+
+if ($NoFreeFallback -and @($Chain | Where-Object { -not (EhGratuito $_) }).Count -gt 0) {
+  $Chain = @($Chain | Where-Object { -not (EhGratuito $_) })
+}
+
 $attempts = @()
 $ok = $false
 $i = 0
@@ -166,8 +260,8 @@ foreach ($entry in $Chain) {
   $kind, $model = $entry.Split(':', 2)
   $effort = $null
   if ($model -match '^(.+)@(low|medium|high|xhigh|max)$') { $model = $Matches[1]; $effort = $Matches[2] }
-  # Skip a provider that is out of (or close to the end of) its quota; the last entry always runs.
-  if ($i -lt $Chain.Count) {
+  # Skip a provider that is out of (or close to the end of) its quota; the last entry always runs unless NoFreeFallback.
+  if ($NoFreeFallback -or $i -lt $Chain.Count) {
     $motivo = SemCota $kind $model
     if ($motivo) {
       Ev 'troca' $entry "pulado antes de comecar: $motivo"
@@ -186,56 +280,55 @@ foreach ($entry in $Chain) {
   [IO.File]::WriteAllText((Join-Path $LogDir 'current.json'), ([pscustomobject]@{ worker = $entry; attempt = $i; started = $start.ToString('s') } | ConvertTo-Json -Compress), $utf8)
   Ev 'tentativa' $entry "comecou (tentativa $i de $($Chain.Count))"
 
-  $effArgs = @()
+  $runRes = $null
   if ($kind -eq 'agy') {
-    if ($effort) { $effArgs = @('--effort', $effort) }
+    $eff = if ($effort) { "--effort $effort" } else { '' }
+    $to = if ($TimeoutSeconds -gt 0) { "--print-timeout $($TimeoutSeconds)s" } else { '' }
     [IO.File]::WriteAllText($pf, $prompt, $utf8)    # kept only so the usage can be estimated afterwards
-    $arg = '--print=' + $prompt.Replace('"', '\"')
-    & $agy --model $model @effArgs --dangerously-skip-permissions --print-timeout "$($TimeoutSeconds)s" --add-dir $Cwd $arg 1> $out 2> $err
-    $code = $LASTEXITCODE
+    $safePrompt = ($prompt -replace "[\r\n]+", ' ')
+    $arg = '--print=' + $safePrompt.Replace('"', '\"')
+    $runRes = RunWatchedProcess $agy "--model $model $eff --dangerously-skip-permissions $to --add-dir `"$Cwd`" $arg" $null $out $err $false 0
   } elseif ($kind -eq 'claude') {
     # Watched process (not a blocking pipe) so the quota can be read while it works.
     [IO.File]::WriteAllText($pf, $prompt, $utf8)
     $eff = if ($effort) { "--effort $effort" } else { '' }
-    $linha = "claude -p --model $model $eff --dangerously-skip-permissions --output-format stream-json --verbose < `"$pf`" > `"$out`" 2> `"$err`""
-    $proc = Start-Process cmd.exe -ArgumentList "/d /s /c `"$linha`"" -WindowStyle Hidden -PassThru
-    $null = $proc.Handle    # keeps ExitCode readable in PowerShell 5.1
     $proximo = 0
     for ($k = $i; $k -lt $Chain.Count; $k++) { if (-not $Chain[$k].StartsWith('claude:')) { $proximo = $k + 1; break } }
-    $ultimaLeitura = Get-Date
-    $handoff = $null
-    while (-not $proc.WaitForExit(30000)) {
-      if ($proximo -eq 0 -or ((Get-Date) - $ultimaLeitura).TotalMinutes -lt $QuotaCheckMinutes) { continue }
-      $ultimaLeitura = Get-Date
-      $cq = ClaudeQuota
-      if ($cq -and $cq.read -and ([double]$cq.fiveHour -ge $HandoffAt -or [double]$cq.sevenDay -ge 0.95)) {
-        $handoff = "cota do Claude em $([Math]::Round([double]$cq.fiveHour * 100))% (5 h) / $([Math]::Round([double]$cq.sevenDay * 100))% (semana)"
-        & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null
-        break
-      }
-    }
-    if ($handoff) {
-      $resumo = ResumoAcoes $out
-      $notaHandoff = "`n`nATENCAO - CONTINUACAO DE TAREFA: o modelo anterior ($entry) estava fazendo esta tarefa e foi interrompido de proposito porque a $handoff, perto do limite. Voce assume daqui. Antes de tudo rode git status, git diff --stat e git log -3 para ver o que ja foi feito; continue do ponto em que ele parou, sem refazer nem apagar o que esta pronto, e faca o fechamento que a tarefa pede.`n`n$resumo`n"
-      $attempts += [pscustomobject]@{ worker = $entry; exitCode = $null; quota = $true; handoff = $handoff; emptyOutput = $false
-        started = $start.ToString('s'); finished = (Get-Date).ToString('s'); out = $out; err = $err; text = $txt
-        uso = (UsoTentativa $kind $entry $out $pf $txt) }
-      Ev 'troca' $entry "$handoff; passando a tarefa para $($Chain[$proximo - 1]) com o resumo do que ja foi feito"
-      $pularAte = $proximo
-      continue
-    }
-    $proc.WaitForExit()
-    $code = $proc.ExitCode
+    $runRes = RunWatchedProcess 'claude' "-p --model $model $eff --dangerously-skip-permissions --output-format stream-json --verbose" $pf $out $err $true $proximo
   } elseif ($kind -eq 'opencode') {
     # --auto: same trust level as the other providers (they run with --dangerously-skip-permissions).
-    if ($effort) { $effArgs = @('--variant', $effort) }
+    $eff = if ($effort) { "--variant $effort" } else { '' }
     [IO.File]::WriteAllText($pf, $prompt, $utf8)    # kept only so the usage can be estimated afterwards
-    $prompt | & opencode run --pure --auto --model $model @effArgs --format json --title "delegar $taskId" 1> $out 2> $err
-    $code = $LASTEXITCODE
+    $runRes = RunWatchedProcess 'opencode' "run --pure --auto --model $model $eff --format json --title `"delegar $taskId`"" $pf $out $err $false 0
   } else {
     Ev 'erro' $entry "provedor desconhecido: $kind"
     continue
   }
+
+  if ($runRes.stalled) {
+    Ev 'vigia' $entry "sem saida nem evento por $([Math]::Round($idleLimitSec / 60, 2)) min; encerrando e passando para o proximo modelo"
+    $attempts += [pscustomobject]@{
+      worker = $entry; exitCode = -1; quota = $false; stalled = $true; emptyOutput = $true
+      started = $start.ToString('s'); finished = (Get-Date).ToString('s'); out = $out; err = $err; text = $txt
+      uso = $null
+    }
+    continue
+  }
+
+  if ($runRes.handoff) {
+    $resumo = ResumoAcoes $out
+    $notaHandoff = "`n`nATENCAO - CONTINUACAO DE TAREFA: o modelo anterior ($entry) estava fazendo esta tarefa e foi interrompido de proposito porque a $($runRes.handoff), perto do limite. Voce assume daqui. Antes de tudo rode git status, git diff --stat e git log -3 para ver o que ja foi feito; continue do ponto em que ele parou, sem refazer nem apagar o que esta pronto, e faca o fechamento que a tarefa pede.`n`n$resumo`n"
+    $attempts += [pscustomobject]@{
+      worker = $entry; exitCode = $null; quota = $true; handoff = $runRes.handoff; emptyOutput = $false
+      started = $start.ToString('s'); finished = (Get-Date).ToString('s'); out = $out; err = $err; text = $txt
+      uso = (UsoTentativa $kind $entry $out $pf $txt)
+    }
+    Ev 'troca' $entry "$($runRes.handoff); passando a tarefa para $($Chain[$proximo - 1]) com o resumo do que ja foi feito"
+    $pularAte = $proximo
+    continue
+  }
+
+  $code = $runRes.code
 
   $fin = FinalText $kind $out
   $finText = [string]$fin.text
@@ -281,14 +374,16 @@ try {
     if ($linhaTotal) { $usoTotal = $linhaTotal | ConvertFrom-Json }
   }
 } catch { $usoTotal = $null }
+$quotaExhausted = (-not $ok) -and ($attempts.Count -gt 0) -and (@($attempts | Where-Object { -not $_.quota }).Count -eq 0)
 $result = [pscustomobject]@{
   ok = $ok
+  quotaExhausted = [bool]$quotaExhausted
   model = if ($ok) { $attempts[-1].worker } else { $null }
   promptFile = $PromptFile
   attempts = $attempts
   uso = $usoTotal
 }
-$result | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $LogDir 'result.json') -Encoding UTF8
+[IO.File]::WriteAllText((Join-Path $LogDir 'result.json'), ($result | ConvertTo-Json -Depth 8), $utf8)
 Remove-Item (Join-Path $LogDir 'current.json') -ErrorAction SilentlyContinue
 $result | ConvertTo-Json -Depth 8
 if ($ok) { exit 0 } else { exit 1 }

@@ -2,8 +2,8 @@
 titulo: Orquestrador delegar (planejar com um modelo, executar com vários)
 categoria: guias_e_comandos
 tags: [ia, orquestracao, claude, gemini, opencode, agentes]
-atualizado: 2026-11-12
-resumo: Como usar a skill delegar - painel, CLI, modos de modelos, modo desespero com gratuitos, acompanhamento com paradas e tela de atividade.
+atualizado: 2026-11-17
+resumo: Como usar a skill delegar: painel local, CLI, modos e perfis, velocidade e esforço, cotas reais do Antigravity, tokens e custos, rodadas, vigia de 20 min e paralelismo até 6.
 ---
 
 # 🤖 Orquestrador `delegar`
@@ -13,6 +13,7 @@ Fonte: `skills/delegar/` do kit; instalado em `~/.claude/skills/delegar`. Instru
 ## Como usar
 - Diga ao agente: "delegar: <pedido grande>" (ou "orquestra", "manda pro Gemini", "economiza minha cota").
 - Ou abra o painel: `node %USERPROFILE%\.claude\skills\delegar\app\cli.mjs iniciar` → http://127.0.0.1:8790.
+- **Acesso exclusivo deste computador:** o painel escuta apenas em `127.0.0.1` (recusa subir se `DELEGAR_HOST`, `HOST` ou `--host` apontar para outro endereço) e `ehLoopback` recusa com HTTP 403 qualquer `remoteAddress` fora de `127.0.0.1`, `::1` e `::ffff:127.0.0.1` antes do token e do `Host`, inclusive em `/api/saude` e arquivos estáticos.
 - Fluxo: novo projeto (pasta + pedido) → conversa com o planejador → plano em tabela (tarefas, nível, modelos, dependências) → Aprovar → execução em segundo plano, que continua mesmo se a sessão do agente fechar.
 - "Confiar no orquestrador" (`--auto`): planeja sem perguntar e já executa.
 
@@ -68,6 +69,21 @@ A lista de modelos gratuitos muda com o tempo: quando `opencode models` mostrar 
 - **Resumo da execução:** no fim, a conversa do projeto recebe a mensagem "Resumo da execução" (o que cada tarefa entregou, modelo usado, trocas de modelo, commits) e o relatório do cofre ganha a seção Resumo.
 - **Instalação incremental:** o `install.py` só grava arquivos novos ou alterados, não apaga a pasta da skill.
 - **Teste feito:** cota falsa a 99%, cadeia `claude:haiku`, `claude:sonnet`, `opencode:opencode/big-pickle`: Haiku encerrado em 31 s, Sonnet pulado, `big-pickle` concluiu e fez o commit.
+
+## Perfis, velocidade, esforço e rodadas
+- **Perfis salvos:** permitem guardar um conjunto personalizado de cadeias em `~/.delegar/perfis.json` (até 50 perfis) para reaproveitar entre projetos pelo painel ou pela CLI (`cli.mjs perfis`, `novo --perfil`, `modo <id> --perfil`).
+- **Velocidade e esforço:** a velocidade do projeto (`auto`, `rapido`, `medio`, `demorado`) controla o esforço dos modelos (`low`, `medium`, `high`). A prioridade é: velocidade fixa do projeto > `esforco` individual da tarefa > padrão do modo. Integração e verificação (`fixChain` e `coordinatorChain`) nunca usam esforço baixo.
+- **Histórico de rodadas:** ao continuar um projeto `concluido` ou `cancelado` com uma nova mensagem, a execução anterior é arquivada em `p.rodadas[]` e seus arquivos vão para `logs/rodada-N/`. O contexto das rodadas anteriores alimenta o planejador e os custos são somados no acumulado do projeto (`cli.mjs migrar-rodadas <id>` converte o formato legado).
+
+## Cotas, tokens e custos
+- **Cotas reais do Antigravity e Claude:** `quota.ps1` lê `agy --p /usage` em três grupos (`gemini`, `argon`, `agyClaudeGpt`) além da cota direta do Claude (janelas de 5 h e semanal). `worker.ps1` e `quota.ps1` separam estouros em `quota-ledger.jsonl` por grupo e pulam `agy:claude-*` e `agy:gpt-*` quando `agyClaudeGpt` está esgotado.
+- **Histórico e estimativa por 1%:** leituras de cota ficam em `~/.delegar/state/quota-historico.jsonl` para estimar quantos tokens locais correspondem a 1% de cota por modelo e a relação entre janela de 5 h e semanal.
+- **Tokens e custos:** conta tokens reais do Claude e do opencode (e do `result` ou estimativa de caracteres no agy), aplica a tabela de preços (`~/.delegar/precos.json`, atualizada mensalmente via LiteLLM) e exibe por período (`hoje`, `7d`, `30d`, `tudo`), mês (`--mes`) ou intervalo (`--de`/`--ate`).
+
+## Paralelismo até 6, vigia e integração protegida (17/11/2026)
+- **Paralelismo até 6:** com cota de Gemini folgada (`gemini.maxParallel = 6` com menos de 50% usado ou janela de 5 h renovando em menos de 1 h), `quota.ps1` recomenda até 6 simultâneos, o planejador preenche `maxConcurrent` igual ao número de escritores independentes (até 6) e o pipeline sobe a concorrência das tarefas prontas em cadeias Gemini.
+- **Vigia de 20 min:** o `worker.ps1` monitora todas as CLIs com `-IdleTimeoutMinutes 20`: se uma tentativa ficar 20 minutos sem saída nem evento, é encerrada, registra o evento `vigia` em `events.jsonl` e passa para o próximo modelo da cadeia.
+- **Integração sem cair em gratuito:** tarefas `main`/integradoras não recebem reserva gratuita e, sem cota nos modelos pagos, aguardam a cota renovar (exceto no modo `desespero`). O `Verify` do `pipeline.ps1` ignora arquivos que já estavam sujos antes da tarefa por outras sessões, e `fixChain` / `coordinatorChain` aproveitam na frente os modelos das cadeias editadas por tarefa (`cadeias` em `/ajustes`).
 
 ## Cuidados
 - Os agentes executam sem pedir confirmação (exceto as paradas do acompanhamento). Os prompts devem proibir mexer em segredos, outros repositórios e trabalho alheio.

@@ -190,7 +190,7 @@ test('catalogo traz novo, descoberto, desespero e descoberta', async () => {
   const fixo = c.modelos.find((m) => m.id === 'opencode:opencode/big-pickle');
   assert.equal(fixo.novo, false);
   assert.equal(fixo.descoberto !== null, true); // descoberto mas conhecido
-  assert.equal(fixo.desespero, 2);
+  assert.equal(fixo.desespero, DESESPERO.indexOf('opencode:opencode/big-pickle') + 1);
   assert.equal(c.modelos.filter((m) => m.id === 'opencode:opencode/big-pickle').length, 1);
   const semDescoberta = c.modelos.find((m) => m.id === 'claude:opus');
   assert.equal(semDescoberta.descoberto, null);

@@ -19,12 +19,13 @@
 //   node cli.mjs modelos [--atualizar]           provedores instalados, modelos (novos marcados com [novo]) e a ordem do modo desespero;
 //                                                --atualizar lê de novo as listas do agy e do opencode agora
 //   node cli.mjs cotas [--atualizar]             restante de cada cota (5 h e semanal) e quando renova; --atualizar lê de novo agora (20 a 40 s)
-//   node cli.mjs uso [id] [--periodo hoje|7d|30d|tudo]   tokens e custos por modelo e tarefa (ou geral se sem id)
+//   node cli.mjs uso [id] [--periodo hoje|7d|30d|tudo | --mes AAAA-MM | --de AAAA-MM-DD --ate AAAA-MM-DD]   tokens e custos por modelo e tarefa (ou geral se sem id)
 //   node cli.mjs precos [--atualizar]            tabela de preços por milhão de tokens; --atualizar baixa da fonte agora
 //   node cli.mjs arquivar <id> | desarquivar <id>   tira o projeto da lista (ou devolve)
 //   node cli.mjs excluir <id>                    move a pasta do projeto para a lixeira (DATA/lixeira); não toca no repositório
 //   node cli.mjs status [--todos]                lista os projetos; --todos inclui os arquivados
 //   node cli.mjs esperar <id> [minutos]          espera o planejador responder, uma confirmação ou o fim da execução
+//   node cli.mjs migrar-rodadas <id>             reconstrói as rodadas anteriores a partir de rodadas/<n>/ (recusa enquanto o projeto executa)
 // O pedido também pode vir de um arquivo: --arquivo <caminho>.
 // modo.json (personalizado): {"planner":[...],"tiers":{"pesado":[...],"volume":[...],"leve":[...]},"fix":[...],"coord":[...],"maxConcurrent":2}
 // Cada modelo é "provedor:modelo[@esforço]", provedor = claude | agy | opencode.
@@ -83,6 +84,7 @@ const TAREFA = { pending: 'na fila', waiting: 'aguardando confirmação', runnin
 function mostrar(p, n = 3) {
   console.log(`${p.titulo}\n  id: ${p.id}\n  estado: ${p.estado}${p.ocupado ? ' (planejador pensando)' : ''} · modo: ${p.modoNome} · velocidade: ${p.velocidade || 'auto'} · acompanhamento: ${p.supervisao}${p.auto ? ' · automático' : ''}${p.run?.desespero ? ' · MODO DESESPERO' : ''}\n  planejador: ${p.planejador || (p.plannerEfetivo || [])[0] || '-'}\n  repo: ${p.repo}\n  painel: ${BASE}/#${p.id}`);
   for (const m of (p.mensagens || []).slice(-n)) console.log(`\n[${m.papel}${m.modelo ? ' ' + m.modelo : ''}] ${m.texto}`);
+  if (Array.isArray(p.rodadas) && p.rodadas.length > 0) console.log(`  rodadas anteriores: ${p.rodadas.length} (${p.rodadas.map((r) => '#' + r.numero + ' ' + r.estado + (r.uso?.total?.usd != null ? ' US$ ' + fmtUsd(r.uso.total.usd) : '')).join(', ')})`);
   if (p.plano) {
     console.log(`\nPlano: ${p.plano.resumo || ''}`);
     for (const t of p.plano.tarefas) {
@@ -123,21 +125,24 @@ export function formatarCotas(dados) {
   const linhas = d.linhas || [];
   if (!linhas.length) out.push('Nenhuma cota para mostrar.');
   else {
-    const tabela = [['Cota', 'Restante', 'Renova', 'Lida em', 'Fonte/nota']];
+    const tabela = [['Cota', 'Restante', 'Renova', '1% da cota', 'Lida em', 'Fonte/nota']];
     for (const l of linhas) {
       let restante = !l.instalado ? 'não instalado' : l.restante == null ? '-' : `${Math.round(l.restante * 100)}%`;
       if (l.semCota) restante += ' SEM COTA';
       const renova = l.renovaEm ? `${new Date(l.renovaEm).toLocaleString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} (${emQuanto(l.renovaEm)})` : '-';
+      const estimativa = l.estimativa?.texto || (l.chave === 'opencode' ? '-' : 'dados insuficientes');
       tabela.push([
         l.nome + (l.janela ? ` (${l.janela})` : ''),
         restante,
         renova,
+        estimativa,
         l.lidoEm ? hora(l.lidoEm) : '-',
         [l.fonte, l.nota].filter(Boolean).join(' · ') || '-',
       ]);
     }
     const larg = tabela[0].map((_, i) => Math.max(...tabela.map((r) => r[i].length)));
     for (const r of tabela) out.push(r.map((c, i) => c.padEnd(larg[i])).join('  ').trimEnd());
+    out.push('', 'Nota: a estimativa por 1% soma o consumo local da máquina (logs do Claude Code e do Antigravity, além das tentativas do Delegar); uso em outro PC ou na web não aparece e distorce a conta.');
   }
   if (d.aviso) out.push(`Aviso: ${d.aviso}`);
   return out.join('\n');
@@ -231,6 +236,32 @@ export function formatarUso(dados, { projeto = false } = {}) {
     out.push(...alinharTabela(linMod));
     out.push('');
 
+    const multiRodada = projeto && Array.isArray(d.rodadas) && d.rodadas.length > 1;
+    if (multiRodada) {
+      out.push('Rodadas:');
+      const cabRod = ['Rodada', 'Estado', 'Entrada', 'Saída', 'Cache lido', 'Cache gravado', 'US$'];
+      if (temBrl) cabRod.push('R$');
+      cabRod.push('Origem');
+      const linRod = [cabRod];
+      for (const r of d.rodadas) {
+        const u = r.total || r.uso?.total || {};
+        const row = [
+          `Rodada ${r.numero}${r.titulo ? ' (' + r.titulo + ')' : ''}`,
+          TAREFA_NOMES[r.estado] || r.estado || '-',
+          fmtTokens(u.entrada),
+          fmtTokens(u.saida),
+          fmtTokens(u.cacheLido),
+          fmtTokens(u.cacheGravado),
+          fmtUsd(u.usd),
+        ];
+        if (temBrl) row.push(fmtBrl(u.brl));
+        row.push(u.origem && u.origem !== 'cli' && u.origem !== 'tabela' ? `(${u.origem})` : (u.origem || '-'));
+        linRod.push(row);
+      }
+      out.push(...alinharTabela(linRod));
+      out.push('');
+    }
+
     out.push('Tarefas:');
     const cabTar = ['Tarefa', 'Estado', 'Entrada', 'Saída', 'Cache lido', 'Cache gravado', 'US$'];
     if (temBrl) cabTar.push('R$');
@@ -238,6 +269,11 @@ export function formatarUso(dados, { projeto = false } = {}) {
     const linTar = [cabTar];
 
     const tarefas = [...(d.tarefas || [])].sort((a, b) => {
+      if (multiRodada) {
+        const ra = a.rodada || 1;
+        const rb = b.rodada || 1;
+        if (ra !== rb) return ra - rb;
+      }
       if (a.id === 'planejador') return -1;
       if (b.id === 'planejador') return 1;
       return 0;
@@ -245,7 +281,7 @@ export function formatarUso(dados, { projeto = false } = {}) {
 
     for (const tf of tarefas) {
       const u = tf.total || {};
-      const nome = tf.titulo ? `${tf.id} (${tf.titulo})` : tf.id;
+      const nome = (multiRodada ? `R${tf.rodada || 1}/` : '') + (tf.titulo ? `${tf.id} (${tf.titulo})` : tf.id);
       const estadoFormatado = TAREFA_NOMES[tf.estado] || tf.estado || '-';
       const row = [
         nome,
@@ -358,17 +394,47 @@ try {
     }
     case 'uso': {
       const id = o._[0];
-      const periodo = o.periodo || '30d';
-      if (!['hoje', '7d', '30d', 'tudo'].includes(periodo)) {
-        throw new Error('período inválido: use hoje, 7d, 30d ou tudo');
-      }
       if (id) {
         const d = await call('GET', `/api/projetos/${encodeURIComponent(id)}/uso`);
         console.log(formatarUso(d, { projeto: true }));
+      } else if (o.mes) {
+        if (typeof o.mes !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(o.mes)) {
+          throw new Error('mês inválido: use AAAA-MM');
+        }
+        const d = await call('GET', `/api/uso?mes=${encodeURIComponent(o.mes)}`);
+        console.log(formatarUso(d, { projeto: false }));
+      } else if (o.de || o.ate) {
+        const dateRe = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+        const params = [];
+        if (o.de) {
+          if (typeof o.de !== 'string' || !dateRe.test(o.de)) {
+            throw new Error('data inválida: use AAAA-MM-DD');
+          }
+          params.push(`de=${encodeURIComponent(o.de)}`);
+        }
+        if (o.ate) {
+          if (typeof o.ate !== 'string' || !dateRe.test(o.ate)) {
+            throw new Error('data inválida: use AAAA-MM-DD');
+          }
+          params.push(`ate=${encodeURIComponent(o.ate)}`);
+        }
+        const d = await call('GET', `/api/uso?${params.join('&')}`);
+        console.log(formatarUso(d, { projeto: false }));
       } else {
+        const periodo = o.periodo || '30d';
+        if (!['hoje', '7d', '30d', 'tudo'].includes(periodo)) {
+          throw new Error('período inválido: use hoje, 7d, 30d ou tudo');
+        }
         const d = await call('GET', `/api/uso?periodo=${encodeURIComponent(periodo)}`);
         console.log(formatarUso(d, { projeto: false }));
       }
+      break;
+    }
+    case 'migrar-rodadas': {
+      if (!o._[0]) throw new Error('uso: migrar-rodadas <id>');
+      const r = await call('POST', '/api/projetos/' + o._[0] + '/migrar-rodadas');
+      console.log('Rodadas migradas: ' + (r.rodadas?.length || 0));
+      mostrar(r, 1);
       break;
     }
     case 'precos': {

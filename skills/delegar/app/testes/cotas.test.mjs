@@ -47,7 +47,7 @@ test('formato TAB: Gemini, Argon e Claude/GPT', () => {
   assert.equal(r.gemini.fiveHour, 0.1);
   assert.equal(r.gemini.sevenDay, 0.45);
   assert.equal(r.gemini.exhausted, false);
-  assert.equal(r.gemini.maxParallel, 5); // menos de 50% usado: até 5 agentes ao mesmo tempo
+  assert.equal(r.gemini.maxParallel, 6); // menos de 50% usado: até 6 agentes ao mesmo tempo
   assert.equal(r.gemini.fiveHourResets, local('2026-11-13T17:07:41Z'));
   assert.equal(r.gemini.sevenDayResets, local('2026-11-17T14:04:15Z'));
   assert.equal(r.argon.read, true);
@@ -60,6 +60,12 @@ test('formato TAB: Gemini, Argon e Claude/GPT', () => {
   assert.deepEqual(grupos, [
     'agyClaudeGpt/fiveHour', 'agyClaudeGpt/sevenDay', 'argon/sevenDay', 'gemini/fiveHour', 'gemini/sevenDay',
   ]);
+  const histPath = path.join(dir, 'state', 'quota-historico.jsonl');
+  assert.equal(fs.existsSync(histPath), true, 'quota-historico.jsonl deve existir');
+  const linhasHist = fs.readFileSync(histPath, 'utf8').trim().split(/\r?\n/).filter(Boolean);
+  assert.equal(linhasHist.length >= 1, true);
+  const histObj = JSON.parse(linhasHist[0]);
+  assert.equal(histObj.gemini?.read, true);
 });
 
 test('formato de terminal com Quota: e hora -03', () => {
@@ -69,7 +75,7 @@ test('formato de terminal com Quota: e hora -03', () => {
   assert.equal(r.gemini.sevenDay, 0.45);
   assert.equal(r.argon.sevenDayRemaining, 0.84);
   assert.equal(r.agyClaudeGpt.read, true);
-  assert.equal(r.gemini.maxParallel, 5); // menos de 50% usado: até 5 agentes ao mesmo tempo
+  assert.equal(r.gemini.maxParallel, 6); // menos de 50% usado: até 6 agentes ao mesmo tempo
   assert.equal(r.gemini.sevenDayResets, local('2026-11-17T14:04:00Z'));
   assert.equal(r.gemini.fiveHourResets, local('2026-11-13T17:07:00Z'));
   assert.equal(r.argon.sevenDayResets, local('2026-11-17T16:25:00Z'));
@@ -122,6 +128,43 @@ test('Gemini com 1% na janela de 5 h: esgotado e zero workers', () => {
   assert.equal(r.gemini.fiveHourRemaining, 0.01);
   assert.equal(r.gemini.exhausted, true);
   assert.equal(r.gemini.maxParallel, 0);
+});
+
+test('recommendedConcurrent chega a 6 com Gemini folgado', () => {
+  const r = rodar(path.join(FIX, 'agy-usage-tab.txt'));
+  assert.equal(r.gemini.maxParallel, 6);
+  assert.equal(r.recommendedConcurrent, 6);
+});
+
+test('agyClaudeGpt esgotado (1% restante) marca exhausted sem zerar gemini.maxParallel', () => {
+  const texto = [
+    'Gemini Models\tWeekly Limit Remaining\t55%\t2026-11-17T14:04:15Z',
+    'Gemini Models\tFive Hour Limit Remaining\t90%\t2026-11-13T17:07:41Z',
+    'Claude and GPT models\tWeekly Limit Remaining\t1%\t2026-11-20T14:30:15Z',
+  ].join('\n');
+  const r = rodar(gravar(texto));
+  assert.equal(r.agyClaudeGpt.read, true);
+  assert.equal(r.agyClaudeGpt.exhausted, true);
+  assert.equal(r.gemini.read, true);
+  assert.equal(r.gemini.exhausted, false);
+  assert.equal(r.gemini.maxParallel, 6);
+});
+
+test('estouro de agy:claude-sonnet-5-5-high no quota-ledger.jsonl nao zera gemini.maxParallel', () => {
+  const stateDir = path.join(dir, 'state');
+  fs.mkdirSync(stateDir, { recursive: true });
+  const agora = new Date().toISOString();
+  const ledgerPath = path.join(stateDir, 'quota-ledger.jsonl');
+  fs.writeFileSync(ledgerPath, JSON.stringify({ time: agora, worker: 'agy:claude-sonnet-5-5-high', logDir: 'C:\\fake' }) + '\n', 'utf8');
+
+  const saida = execFileSync('powershell.exe', [
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', QUOTA, '-SkipClaudeProbe', '-SkipAgy',
+  ], { env: { ...process.env, DELEGAR_DATA: dir }, encoding: 'utf8', timeout: 60000 });
+  const linhas = saida.split(/\r?\n/).filter((l) => !l.startsWith('recommendedConcurrent='));
+  const r = JSON.parse(linhas.join('\n'));
+
+  assert.equal(r.gemini.lastQuotaHit, null);
+  assert.notEqual(r.gemini.maxParallel, 0);
 });
 
 test('quota.ps1 é ASCII puro', () => {

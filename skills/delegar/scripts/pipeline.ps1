@@ -50,7 +50,7 @@ function Ev($tipo, $tarefa, $modelo, $texto) {
   $line = [pscustomobject]@{ time = (Get-Date).ToString('s'); tipo = $tipo; tarefa = $tarefa; modelo = $modelo; texto = $texto } | ConvertTo-Json -Compress
   for ($k = 0; $k -lt 5; $k++) { try { [IO.File]::AppendAllText($eventsFile, $line + "`n", $utf8); return } catch { Start-Sleep -Milliseconds 200 } }
 }
-function Notify($m) { try { msg $env:USERNAME "Delegar $($p.name): $m" 2>$null } catch {} }
+function Notify($m) { if ($env:DELEGAR_SEM_AVISO) { return }; try { msg $env:USERNAME "Delegar $($p.name): $m" 2>$null } catch {} }  # testes definem DELEGAR_SEM_AVISO=1
 
 # Supervision is re-read every loop, so the panel can change it while the pipeline runs.
 function Supervision {

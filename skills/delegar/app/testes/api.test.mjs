@@ -1,6 +1,7 @@
 // Testes de ataque da API do painel Delegar (perfis e descoberta de modelos).
 // Sobe o server.mjs real numa porta de teste, com DATA e cofre temporários e sem nenhum provedor de IA
 // (DELEGAR_PROVEDORES=nenhum): nenhuma CLI real é chamada e nenhum planejador roda.
+process.env.DELEGAR_SEM_AVISO = '1'; // pipelines de teste não abrem o aviso msg do Windows
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

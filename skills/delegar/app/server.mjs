@@ -738,7 +738,11 @@ function startPipeline(p, resume = false) {
   if (!resume && temRodadaExecutada(p, pdir(p.id))) arquivarRodadaSePreciso(p, { manterPlano: true });
   const pf = resume ? path.join(pdir(p.id), 'plan.json') : buildPlanFile(p);
   if (!resume) limparLogsRaiz(path.join(pdir(p.id), 'logs'));
-  else gravarSupervisao(p);
+  else {
+    gravarSupervisao(p);
+    // Resumo da execução anterior sairia como "terminou" logo depois de retomar.
+    try { fs.rmSync(path.join(pdir(p.id), 'logs', 'summary.md'), { force: true }); } catch { /* sem resumo antigo */ }
+  }
   try { p.pid = spawnPipeline(pf, resume); }
   catch (e) {
     p.estado = 'interrompido'; p.mensagens.push({ papel: 'sistema', texto: 'Falha ao iniciar o pipeline: ' + e.message, quando: now() });
@@ -878,7 +882,8 @@ function poll() {
     if (p.estado !== 'executando') continue;
     const r = readRun(p);
     const h = crypto.createHash('md5').update(JSON.stringify(r.status)).digest('hex');
-    const ended = /pipeline end/.test(r.log) && r.summary;
+    // Retomar reaproveita o pipeline.log: só termina se o último "pipeline end" vier depois do último "pipeline start".
+    const ended = r.summary && r.log.lastIndexOf('pipeline end') > r.log.lastIndexOf('pipeline start');
     if (ended) {
       p.estado = /RESULTADO: CONCLUIDO/.test(r.summary) ? 'concluido' : 'incompleto';
       p.fim = now();

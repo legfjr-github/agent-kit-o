@@ -190,6 +190,11 @@ function RunWatchedProcess($fileName, $argString, $stdinFile, $outFile, $errFile
   $redir = if ($stdinFile) { "< `"$stdinFile`" > `"$outFile`" 2> `"$errFile`"" } else { "> `"$outFile`" 2> `"$errFile`"" }
   $linha = "call `"$fileName`" $argString $redir"
   $proc = Start-Process cmd.exe -ArgumentList "/d /s /c `"$linha`"" -WindowStyle Hidden -PassThru
+  return WatchProcess $proc $outFile $errFile $checkClaudeHandoff $proximoIdx
+}
+
+# Laco de vigia comum (inatividade e troca por cota do Claude) para um processo ja iniciado.
+function WatchProcess($proc, $outFile, $errFile, $checkClaudeHandoff, $proximoIdx) {
   $null = $proc.Handle
 
   $pollMs = if ($idleLimitSec -gt 0) { [Math]::Min(5000, [Math]::Max(200, [int]($idleLimitSec * 250))) } else { 5000 }
@@ -282,12 +287,17 @@ foreach ($entry in $Chain) {
 
   $runRes = $null
   if ($kind -eq 'agy') {
-    $eff = if ($effort) { "--effort $effort" } else { '' }
-    $to = if ($TimeoutSeconds -gt 0) { "--print-timeout $($TimeoutSeconds)s" } else { '' }
-    [IO.File]::WriteAllText($pf, $prompt, $utf8)    # kept only so the usage can be estimated afterwards
-    $safePrompt = ($prompt -replace "[\r\n]+", ' ')
-    $arg = '--print=' + $safePrompt.Replace('"', '\"')
-    $runRes = RunWatchedProcess $agy "--model $model $eff --dangerously-skip-permissions $to --add-dir `"$Cwd`" $arg" $null $out $err $false 0
+    [IO.File]::WriteAllText($pf, $prompt, $utf8)    # o agy-runner.ps1 le o prompt deste arquivo
+    # NAO MUDAR (regra do usuario, 17/11/2026): o agy roda DIRETO pelo PowerShell (agy-runner.ps1 faz & $agy),
+    # com o prompt lido de arquivo e quebras de linha preservadas. Nada de "cmd /c" (limite de ~8 mil caracteres,
+    # quebra com aspas e & | < >: o agy saia com codigo 1 sem resposta). Teste: testes/worker-agy-direto.test.mjs.
+    $runner = Join-Path $PSScriptRoot 'agy-runner.ps1'
+    $q = { param($s) '"' + ([string]$s).Replace('"', '\"') + '"' }
+    $rArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (& $q $runner), '-Agy', (& $q $agy), '-PromptFile', (& $q $pf),
+      '-Model', (& $q $model), '-Cwd', (& $q $Cwd), '-OutFile', (& $q $out), '-ErrFile', (& $q $err), '-TimeoutSeconds', [string]$TimeoutSeconds)
+    if ($effort) { $rArgs += @('-Effort', (& $q $effort)) }
+    $procAgy = Start-Process powershell.exe -ArgumentList ($rArgs -join ' ') -WindowStyle Hidden -PassThru
+    $runRes = WatchProcess $procAgy $out $err $false 0
   } elseif ($kind -eq 'claude') {
     # Watched process (not a blocking pipe) so the quota can be read while it works.
     [IO.File]::WriteAllText($pf, $prompt, $utf8)

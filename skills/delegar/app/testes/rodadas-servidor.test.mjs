@@ -1,5 +1,6 @@
 // Testes do servidor para múltiplas rodadas e migração de rodadas.
 // Sobe um servidor real isolado com DELEGAR_DATA e DELEGAR_VAULT em diretório temporário.
+process.env.DELEGAR_SEM_AVISO = '1'; // pipelines de teste não abrem o aviso msg do Windows
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

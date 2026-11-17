@@ -1,5 +1,6 @@
 // Testes do servidor para uso de tokens (/api/uso, /api/projetos/:id/uso) e preços (/api/precos).
 // Sobe um servidor isolado com projeto falso, fixtures de logs e servidor HTTP falso para preços.
+process.env.DELEGAR_SEM_AVISO = '1'; // pipelines de teste não abrem o aviso msg do Windows
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

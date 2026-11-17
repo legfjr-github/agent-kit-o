@@ -1,3 +1,4 @@
+process.env.DELEGAR_SEM_AVISO = '1'; // pipelines de teste não abrem o aviso msg do Windows
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, execSync } from 'node:child_process';
@@ -126,7 +127,7 @@ test('worker.ps1 -IdleTimeoutSeconds (vigia) encerra comando travado e passa par
     // Mock que trava quando chamado com travado e responde ok quando chamado com rapido
     fs.writeFileSync(mockAgy, [
       '@echo off',
-      'echo %* | findstr "travado" >nul',
+      'echo %2 | findstr "travado" >nul', // só o nome do modelo (%1 = --model): o prompt pode citar o modelo anterior
       'if %errorlevel% equ 0 (',
       '  ping 127.0.0.1 -n 11 >nul',
       '  exit /b 0',

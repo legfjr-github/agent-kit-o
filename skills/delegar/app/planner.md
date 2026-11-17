@@ -38,6 +38,7 @@ O prompt inicial lista os provedores instalados neste PC (claude, agy, opencode)
 - Escritores em paralelo; integradores em cadeia (cada um depende do anterior e dos seus escritores).
 - Dois agentes nunca escrevem no mesmo arquivo ao mesmo tempo.
 - Lotes de tamanho parecido; prefira 4 a 12 tarefas. Máximo 40.
+- Em tarefas que mexem na própria skill `delegar`: o prompt deve proibir mudar a chamada do agy (`worker.ps1` → `agy-runner.ps1` → `& $Agy` direto, prompt lido de arquivo, sem `cmd /c` e sem achatar quebras de linha). O teste `worker-agy-direto.test.mjs` tem de continuar passando.
 - Conteúdo de um escritor que precise citar outro do mesmo lote: deixe a ligação para o integrador.
 - `maxConcurrent` (1 a 6) é quantas tarefas rodam ao mesmo tempo. O planejador DEVE sempre preencher `maxConcurrent` igual ao número de escritores independentes que podem rodar juntos (até 6), sem deixar em 2 quando houver 3 a 6 lotes paralelos (por exemplo, 5 lotes de 30 min com 5 simultâneos terminam em ~30 min, com 2 levam 1 h 30). Quando o planejador omitir `maxConcurrent`, o servidor calcula pelo total de escritores do plano. Prefira lotes menores e mais numerosos a poucos lotes grandes. Use 1 ou 2 quando as tarefas dependem umas das outras ou mexem nos mesmos arquivos. A cota disponível limita esse número na hora de rodar.
 

@@ -27,6 +27,9 @@ Cada tarefa pode definir `"esforco": "low" | "medium" | "high"` (opcional, padr�
 
 A velocidade escolhida pelo usuário para o projeto tem prioridade: se for `rapido`, `medio` ou `demorado`, o esforço da execução já está fixado e o campo `esforco` da tarefa será ignorado. Prioridade: velocidade do projeto > esforço da tarefa > modo.
 
+## Demanda por tarefa (`demanda`)
+O campo opcional `demanda` aceita `leitura` (auditar, revisar, conferir, diagnosticar), `geracao` (gerar lições, questões, analisar lotes, traduzir), `codigo` (implementar, corrigir, testes) e `integracao` (integrador, deploy, commit e push). Quando omitido, o sistema deduz pelo prompt e pelo tipo da tarefa.
+
 ## Paradas para confirmação
 O usuário escolhe como acompanhar a execução: automático (sem paradas), acompanhado ou passo a passo. No acompanhado, o sistema para e pergunta antes da primeira integração, antes de recuperar uma falha, antes de trocar para os modelos gratuitos e antes de toda tarefa com `"confirmar": true`.
 Marque `"confirmar": true` (com `"motivo"` curto) só nas tarefas que merecem o olho do usuário: deploy ou publicação, migração ou apagamento de dados, mudança de login/permissão/segurança, alteração em massa difícil de desfazer, gasto de dinheiro. Não marque tarefas rotineiras.
@@ -40,6 +43,7 @@ O prompt inicial lista os provedores instalados neste PC (claude, agy, opencode)
 - Lotes de tamanho parecido; prefira 4 a 12 tarefas. Máximo 40.
 - Em tarefas que mexem na própria skill `delegar`: o prompt deve proibir mudar a chamada do agy (`worker.ps1` → `agy-runner.ps1` → `& $Agy` direto, prompt lido de arquivo, sem `cmd /c` e sem achatar quebras de linha). O teste `worker-agy-direto.test.mjs` tem de continuar passando.
 - Conteúdo de um escritor que precise citar outro do mesmo lote: deixe a ligação para o integrador.
+- Quando as cadeias do modo usam modelos gratuitos (`opencode:nvidia/*`, `opencode:opencode/*`), reparta o trabalho em muitas tarefas curtas e independentes: um ou dois arquivos por escritor, poucos passos, sem tarefa que precise de dezenas de leituras e edições. A NVIDIA gratuita derruba sessões que passam de 10 a 45 min, e cinco escritores ao mesmo tempo não pioram a fila. Nessas cadeias, deixe a parte difícil (lógica central, junção) para o integrador ou para uma tarefa `nivel` `pesado`, que começam num modelo pago.
 - `maxConcurrent` (1 a 6) é quantas tarefas rodam ao mesmo tempo. O planejador DEVE sempre preencher `maxConcurrent` igual ao número de escritores independentes que podem rodar juntos (até 6), sem deixar em 2 quando houver 3 a 6 lotes paralelos (por exemplo, 5 lotes de 30 min com 5 simultâneos terminam em ~30 min, com 2 levam 1 h 30). Quando o planejador omitir `maxConcurrent`, o servidor calcula pelo total de escritores do plano. Prefira lotes menores e mais numerosos a poucos lotes grandes. Use 1 ou 2 quando as tarefas dependem umas das outras ou mexem nos mesmos arquivos. A cota disponível limita esse número na hora de rodar.
 
 ## Conteúdo de cada prompt
@@ -67,6 +71,7 @@ Quando for a hora (o usuário pediu, ou o modo automático está ligado), escrev
       "id": "w1",
       "titulo": "Escrever lições 1 e 2",
       "tipo": "escritor",
+      "demanda": "geracao",
       "nivel": "volume",
       "esforco": "medium",
       "depende": [],

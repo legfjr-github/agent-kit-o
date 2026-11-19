@@ -15,6 +15,8 @@ if not defined NODE (
   pause
   exit /b 1
 )
+rem Encerra o painel anterior na porta 8790 (so processo node, nunca este proprio); porta livre nao e erro.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='SilentlyContinue'; Get-NetTCPConnection -LocalPort 8790 -State Listen | Select-Object -ExpandProperty OwningProcess -Unique | Where-Object { $_ -ne $PID -and $_ -gt 4 -and (Get-Process -Id $_).ProcessName -eq 'node' } | ForEach-Object { Stop-Process -Id $_ -Force }; exit 0" >> "%LOG%" 2>&1
 set "DELEGAR_LANCADOR=1"
 echo [%date% %time%] iniciando com "%NODE%">> "%LOG%"
 "%NODE%" "%~dp0app\cli.mjs" iniciar >> "%LOG%" 2>&1

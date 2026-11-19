@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   modeloSemEsforco, usoClaudeStream, usoClaudeJson, usoOpencode, usoAgyStream,
   estimar, usoDaTentativa, somarUsos,
+  normalizarIdModeloUso, chaveAgrupamentoModelo, temConsumoReal, consolidarListaModelos,
 } from '../uso.mjs';
 
 const fileURLPath = (rel) => fileURLToPath(new URL(rel, import.meta.url));
@@ -240,4 +241,70 @@ test('linha de comando somar: lê a lista pela entrada padrão', () => {
   const r = spawnSync(process.execPath, [USO_CLI, 'somar'], { input: JSON.stringify(lista), encoding: 'utf8' });
   assert.equal(r.status, 0);
   assert.equal(JSON.parse(r.stdout).total.entrada, 3);
+});
+
+test('normalizarIdModeloUso: tira sufixo de esforço e o prefixo do próprio provedor', () => {
+  assert.equal(normalizarIdModeloUso('claude', 'claude:haiku@high'), 'haiku');
+  assert.equal(normalizarIdModeloUso('claude', 'haiku'), 'haiku');
+  assert.equal(normalizarIdModeloUso('opencode', 'claude:haiku'), 'claude:haiku');
+  assert.equal(normalizarIdModeloUso('', 'claude:haiku'), 'haiku');
+  assert.equal(normalizarIdModeloUso('', ''), '');
+});
+
+test('chaveAgrupamentoModelo: apelido e nome canônico caem na mesma chave', () => {
+  assert.equal(chaveAgrupamentoModelo('claude', 'sonnet'), 'claude:claude-sonnet-5-5');
+  assert.equal(chaveAgrupamentoModelo('claude', 'claude-sonnet-5-5@high'), 'claude:claude-sonnet-5-5');
+  assert.equal(chaveAgrupamentoModelo('Claude', 'CLAUDE:Sonnet'), 'claude:claude-sonnet-5-5');
+  assert.equal(chaveAgrupamentoModelo('claude', 'claude:haiku'), 'claude:claude-haiku-5-5');
+  assert.equal(chaveAgrupamentoModelo('claude', 'claude:claude-haiku-5-5'), 'claude:claude-haiku-5-5');
+  assert.equal(chaveAgrupamentoModelo('agy', 'gemini-3.8-flash'), 'agy:gemini-3.8-flash');
+  assert.equal(chaveAgrupamentoModelo('', 'x'), 'desconhecido:x');
+});
+
+test('temConsumoReal: só tokens ou custo acima de zero contam', () => {
+  assert.equal(temConsumoReal({ entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0, custoCliUsd: null }), false);
+  assert.equal(temConsumoReal({ entrada: 5, saida: 0, cacheLido: 0, cacheGravado: 0 }), true);
+  assert.equal(temConsumoReal({ cacheGravado: 7 }), true);
+  assert.equal(temConsumoReal({ custoCliUsd: 0.01 }), true);
+  assert.equal(temConsumoReal({ usd: 0.02 }), true);
+  assert.equal(temConsumoReal(null), false);
+});
+
+test('consolidarListaModelos: une apelido com nome canônico e soma os totais', () => {
+  const lista = [
+    { provedor: 'claude', modelo: 'sonnet', entrada: 10, saida: 20, cacheLido: 30, cacheGravado: 40, usd: 0.1, brl: 0.56 },
+    { provedor: 'claude', modelo: 'claude-sonnet-5-5', entrada: 1, saida: 2, cacheLido: 3, cacheGravado: 4, usd: 0.2, brl: 1.12 },
+  ];
+  const out = consolidarListaModelos(lista);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].modelo, 'claude-sonnet-5-5');
+  assert.equal(out[0].entrada, 11);
+  assert.equal(out[0].saida, 22);
+  assert.equal(out[0].cacheLido, 33);
+  assert.equal(out[0].cacheGravado, 44);
+  assert.equal(out[0].usd, 0.3);
+  assert.equal(out[0].brl, 1.68);
+});
+
+test('consolidarListaModelos: com só um apelido com consumo, o apelido fica como nome', () => {
+  const lista = [
+    { provedor: 'claude', modelo: 'haiku', entrada: 5, saida: 5, cacheLido: 0, cacheGravado: 0, usd: 0.01 },
+    { provedor: 'claude', modelo: 'claude-haiku-5-5', entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0, usd: null },
+  ];
+  const out = consolidarListaModelos(lista);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].modelo, 'haiku');
+  assert.equal(out[0].entrada, 5);
+  assert.equal(out[0].usd, 0.01);
+});
+
+test('consolidarListaModelos: descarta linhas de zero tokens e respeita removerZerados=false', () => {
+  const lista = [
+    { provedor: 'desconhecido', modelo: 'desconhecido', entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0, usd: null },
+    { provedor: 'claude', modelo: 'haiku', entrada: 3, saida: 4, cacheLido: 0, cacheGravado: 0, usd: 0.02 },
+  ];
+  assert.equal(consolidarListaModelos(lista).length, 1);
+  assert.equal(consolidarListaModelos(lista, { removerZerados: false }).length, 2);
+  assert.deepEqual(consolidarListaModelos(null), []);
+  assert.deepEqual(consolidarListaModelos([]), []);
 });

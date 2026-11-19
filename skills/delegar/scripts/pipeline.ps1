@@ -16,7 +16,8 @@ param(
   [Parameter(Mandatory=$true)][string]$Plan,
   [switch]$Resume,
   [int]$QuotaWaitSeconds = 900,
-  [int]$LaunchStaggerSeconds = 60,
+  [int]$LaunchStaggerSeconds = 30,
+  [int]$FreeStaggerSeconds = 10,
   [int]$LoopSleepSeconds = 30
 )
 
@@ -158,6 +159,23 @@ function DirtySnapshot {
   return $snap
 }
 
+# Vault files that the Delegar itself rewrites while a plan runs (server.mjs updates the index and
+# the daily log, and the plan's own note in orquestracao). They are bookkeeping, not worker output,
+# so they must not make the tree look dirty.
+function IsBookkeeping([string]$line) {
+  if ($line.Length -lt 4) { return $false }
+  $rel = $line.Substring(3).Trim().Trim('"')
+  if ($rel -match '->\s*(.+)$') { $rel = $Matches[1].Trim() }
+  $rel = $rel -replace '\\', '/'
+  if ($rel -eq 'vault/00_INDICE.md' -or $rel -eq 'vault/01_LOG_DIARIO.md') { return $true }
+  if ($rel -eq "vault/orquestracao/$($p.name).md") { return $true }
+  # Notas de diagnostico/relatorio em vault/orquestracao que uma tarefa cria e outra acrescenta
+  # (novas, staged ou alteradas): sao registro da rodada, nao fazem a arvore parecer suja.
+  # Caso real 18/11: a tarefa 2 reescreveu o relatorio da tarefa 1 e reprovou 3 vezes.
+  if ($rel -match '^vault/orquestracao/[^/]+\.md$') { return $true }
+  return $false
+}
+
 function Verify($preDirty = $null) {
   $msgs = @()
   Push-Location $repo
@@ -170,6 +188,7 @@ function Verify($preDirty = $null) {
   $dirtyLines = @()
   foreach ($l in $rawLines) {
     if ([string]::IsNullOrWhiteSpace($l)) { continue }
+    if (IsBookkeeping $l) { continue }
     $firstChar = if ($l.Length -gt 0) { $l[0] } else { ' ' }
     $isNotStaged = ($firstChar -eq ' ' -or $firstChar -eq '?')
     if ($preDirty -and $isNotStaged -and $preDirty.ContainsKey($l)) {
@@ -381,7 +400,7 @@ while ($true) {
         return $depsOk
       }).Count
       if ($qn -ge 5 -and $prontasParalelas -gt $maxConc) {
-        $limit = [Math]::Min(6, [Math]::Min($qn, [Math]::Max($maxConc, $prontasParalelas)))
+        $limit = [Math]::Min(8, [Math]::Min($qn, [Math]::Max($maxConc, $prontasParalelas)))
       }
     }
 
@@ -420,7 +439,12 @@ while ($true) {
       Log "$($t.id) started in $cwd"
       Ev 'inicio' $t.id ($ch -join ' > ') "tarefa iniciada em $cwd"
       if ($t.main) { $mainBusy = $true }
-      Start-Sleep $LaunchStaggerSeconds
+      # Intervalo ate o proximo disparo (18/11/2026): gratuito 10 s; pago sem espera quando a leitura de
+      # cota ainda tem vaga acima dos que ja rodam, senao 30 s. Sem proximo disparo possivel, nao espera.
+      $espera = if ((EhGratuito $ch[0]) -or ($ch[0] -like 'opencode:nvidia/*')) { [Math]::Min($FreeStaggerSeconds, $LaunchStaggerSeconds) }
+        elseif (-not $script:desperate -and $qn -gt $running.Count) { 0 }
+        else { $LaunchStaggerSeconds }
+      if ($espera -gt 0 -and $running.Count -lt $limit) { Start-Sleep $espera }
     }
   }
   Start-Sleep $LoopSleepSeconds

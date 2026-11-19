@@ -41,6 +41,7 @@ const isGitRepo = (repo) => repo === '/repo/git';
 const detectar = () => ({ claude: true, agy: true, opencode: true });
 const adaptar = (c) => [...new Set(c)];
 const comReserva = (c) => [...new Set([...c, 'opencode:opencode/glm-5.3-flash-free', 'opencode:opencode/big-pickle'])];
+const tiersDe = (m, vel) => (m?.porVelocidade?.[vel] ? { ...m.tiers, ...m.porVelocidade[vel] } : m?.tiers);
 
 const GH = 'agy:gemini-3.8-flash-high', GM = 'agy:gemini-3.8-flash-medium', GL = 'agy:gemini-3.8-flash-low', ARGON = 'agy:gemini-4-argon-high';
 const D1 = 'opencode:opencode/glm-5.3-flash-free', D2 = 'opencode:opencode/big-pickle', D3 = 'opencode:opencode/minimax-m3.1-flash-free', D4 = 'opencode:opencode/iceman-free';
@@ -97,19 +98,23 @@ const {
   chainFor,
   validatePlan,
   introducao,
+  pagoNaFrente,
 } = new Function(
-  'VELOCIDADE', 'temVel', 'velDe', 'TIPOS', 'NIVEIS', 'MODES', 'cfgDe', 'supDe', 'SUPERVISAO', 'VAULT', 'isGitRepo', 'detectar', 'entradaValida', 'adaptar', 'comReserva',
+  'VELOCIDADE', 'temVel', 'velDe', 'TIPOS', 'NIVEIS', 'MODES', 'cfgDe', 'supDe', 'SUPERVISAO', 'VAULT', 'isGitRepo', 'detectar', 'entradaValida', 'adaptar', 'comReserva', 'tiersDe',
   `
   ${corte('comEsforco')}
   ${corte('esforcoIntegracaoVerificacao')}
   ${corte('esforcoDaTarefa')}
   ${corte('chainFor')}
+  const ehGratuito = (e) => /^opencode:(opencode|nvidia)\\//.test(String(e));
+  ${corte('gratuitosNoFim')}
+  ${corte('pagoNaFrente')}
   ${corte('validatePlan')}
   ${corte('introducao')}
-  return { comEsforco, esforcoIntegracaoVerificacao, esforcoDaTarefa, chainFor, validatePlan, introducao };
+  return { comEsforco, esforcoIntegracaoVerificacao, esforcoDaTarefa, chainFor, validatePlan, introducao, pagoNaFrente };
   `
 )(
-  VELOCIDADE, temVel, velDe, TIPOS, NIVEIS, MODES, cfgDe, supDe, SUPERVISAO, VAULT, isGitRepo, detectar, entradaValida, adaptar, comReserva
+  VELOCIDADE, temVel, velDe, TIPOS, NIVEIS, MODES, cfgDe, supDe, SUPERVISAO, VAULT, isGitRepo, detectar, entradaValida, adaptar, comReserva, tiersDe
 );
 
 test('comEsforco: modelos claude recebem sufixo de esforco', () => {
@@ -269,4 +274,17 @@ test('introducao: exibe velocidade e orientacao correta', () => {
     const txtFixo = introducao(pFixo);
     assert.ok(txtFixo.includes(`Velocidade: ${vel} (o esforço da execução já está fixado pelo usuário; o campo esforco nas tarefas será ignorado).`));
   }
+});
+
+test('pagoNaFrente: integrador e pesado em cadeia só NVIDIA começam no pago do planejador (teste de 19/11)', () => {
+  const nv = ['opencode:nvidia/minimaxai/minimax-m3.1-flash', 'opencode:nvidia/z-ai/glm-5.3-flash'];
+  const p = { modo: 'personalizado', custom: { planner: ['agy:gemini-4-hydrogen-medium'], tiers: { volume: nv, pesado: nv, leve: nv } } };
+  const cfg = (x) => x.custom;
+  const f = new Function('cfgDe', 'adaptar', 'ehGratuito', 'return ' + pagoNaFrente.toString())(cfg, (c) => [...new Set(c)], (e) => /^opencode:(opencode|nvidia)\//.test(String(e)));
+  assert.deepEqual(f(p, { tipo: 'integrador' }, nv), ['agy:gemini-4-hydrogen-medium', ...nv]);
+  assert.deepEqual(f(p, { tipo: 'escritor', nivel: 'pesado' }, nv)[0], 'agy:gemini-4-hydrogen-medium');
+  assert.deepEqual(f(p, { tipo: 'escritor', nivel: 'volume' }, nv), nv);
+  assert.deepEqual(f(p, null, nv, { forcar: true })[0], 'agy:gemini-4-hydrogen-medium');
+  assert.deepEqual(f({ ...p, modo: 'desespero' }, { tipo: 'integrador' }, nv), nv);
+  assert.deepEqual(f(p, { tipo: 'integrador' }, ['claude:sonnet', ...nv]), ['claude:sonnet', ...nv]);
 });

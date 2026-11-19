@@ -507,3 +507,95 @@ test('5. Fixture real: migra a rodada 1 do painel local (se existir na máquina)
   // Valida custo em torno de US$ 6,83 (6.8303)
   assert.ok(Math.abs(r.uso.total.usd - 6.8303) < 0.02, `esperado ~6.8303, obtido ${r.uso.total.usd}`);
 });
+
+test('6. Tentativas puladas (skipped, 0 tokens) não geram modelos zerados', () => {
+  const projDir = novoProjDir('skipped-zero');
+  const p = {
+    id: 'proj-skipped',
+    estado: 'concluido',
+    inicio: 1000,
+    fim: 2000,
+    plano: {
+      titulo: 'Teste skipped',
+      tarefas: [{ id: 'w1', titulo: 'W1', chain: ['claude:sonnet', 'claude:haiku'], after: [], prompt: 'p1' }],
+    },
+    uso: { chamadas: [] },
+  };
+  gravar(path.join(projDir, 'logs', 'status.json'), { w1: { state: 'done' } });
+  gravar(path.join(projDir, 'logs', 'w1', 'result.json'), {
+    ok: true,
+    attempts: [
+      { worker: 'claude:sonnet', skipped: true, reason: 'cota' },
+      {
+        worker: 'claude:haiku',
+        uso: {
+          fonte: 'cli',
+          entrada: 100,
+          saida: 50,
+          cacheLido: 0,
+          cacheGravado: 0,
+          custoCliUsd: 0.01,
+          porModelo: [{ provedor: 'claude', modelo: 'claude-haiku-5-5', entrada: 100, saida: 50, custoCliUsd: 0.01 }],
+        },
+      },
+    ],
+  });
+
+  const dados = dadosUsoProjetoComRodadas(p, { projDir, tabela: TABELA });
+  assert.equal(dados.modelos.length, 1);
+  assert.equal(dados.modelos[0].provedor, 'claude');
+  assert.equal(dados.modelos[0].modelo, 'claude-haiku-5-5');
+  assert.equal(dados.modelos[0].entrada, 100);
+});
+
+test('7. dadosUsoProjetoComRodadas unifica apelido (sonnet) e nome canônico (claude-sonnet-5-5)', () => {
+  const projDir = novoProjDir('unifica-sonnet');
+  const p = {
+    id: 'proj-unifica',
+    estado: 'concluido',
+    inicio: 1000,
+    fim: 2000,
+    plano: {
+      titulo: 'Teste unifica',
+      tarefas: [{ id: 'w1', titulo: 'W1', chain: ['claude:sonnet'], after: [], prompt: 'p1' }],
+    },
+    uso: {
+      chamadas: [
+        {
+          modelo: 'claude:sonnet',
+          entrada: 200,
+          saida: 50,
+          fonte: 'cli',
+          custoCliUsd: 0.02,
+          porModelo: [{ provedor: 'claude', modelo: 'sonnet', entrada: 200, saida: 50, custoCliUsd: 0.02 }],
+        },
+      ],
+    },
+  };
+  gravar(path.join(projDir, 'logs', 'status.json'), { w1: { state: 'done' } });
+  gravar(path.join(projDir, 'logs', 'w1', 'result.json'), {
+    ok: true,
+    attempts: [
+      {
+        worker: 'claude:sonnet',
+        uso: {
+          fonte: 'cli',
+          entrada: 300,
+          saida: 100,
+          cacheLido: 0,
+          cacheGravado: 0,
+          custoCliUsd: 0.03,
+          porModelo: [{ provedor: 'claude', modelo: 'claude-sonnet-5-5', entrada: 300, saida: 100, custoCliUsd: 0.03 }],
+        },
+      },
+    ],
+  });
+
+  const dados = dadosUsoProjetoComRodadas(p, { projDir, tabela: TABELA });
+  assert.equal(dados.modelos.length, 1);
+  assert.equal(dados.modelos[0].provedor, 'claude');
+  assert.equal(dados.modelos[0].modelo, 'claude-sonnet-5-5');
+  assert.equal(dados.modelos[0].entrada, 500);
+  assert.equal(dados.modelos[0].saida, 150);
+  assert.equal(dados.modelos[0].usd, 0.05);
+});

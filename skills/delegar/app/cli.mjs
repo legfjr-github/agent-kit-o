@@ -83,6 +83,7 @@ const TAREFA = { pending: 'na fila', waiting: 'aguardando confirmação', runnin
 
 function mostrar(p, n = 3) {
   console.log(`${p.titulo}\n  id: ${p.id}\n  estado: ${p.estado}${p.ocupado ? ' (planejador pensando)' : ''} · modo: ${p.modoNome} · velocidade: ${p.velocidade || 'auto'} · acompanhamento: ${p.supervisao}${p.auto ? ' · automático' : ''}${p.run?.desespero ? ' · MODO DESESPERO' : ''}\n  planejador: ${p.planejador || (p.plannerEfetivo || [])[0] || '-'}\n  repo: ${p.repo}\n  painel: ${BASE}/#${p.id}`);
+  if (p.agendamento?.ativo) console.log(`  agendamento: ${p.agendamento.texto}`);
   for (const m of (p.mensagens || []).slice(-n)) console.log(`\n[${m.papel}${m.modelo ? ' ' + m.modelo : ''}] ${m.texto}`);
   if (Array.isArray(p.rodadas) && p.rodadas.length > 0) console.log(`  rodadas anteriores: ${p.rodadas.length} (${p.rodadas.map((r) => '#' + r.numero + ' ' + r.estado + (r.uso?.total?.usd != null ? ' US$ ' + fmtUsd(r.uso.total.usd) : '')).join(', ')})`);
   if (p.plano) {
@@ -91,6 +92,14 @@ function mostrar(p, n = 3) {
       const s = p.run?.status?.[t.id];
       console.log(`  - ${t.id} [${t.tipo}/${t.nivel}${t.esforco ? '/' + t.esforco : ''}${t.confirmar ? '/confirmar' : ''}] ${t.titulo || ''} :: ${t.cadeiaEfetiva.join(' > ')}${t.depende.length ? ' :: depende ' + t.depende.join(',') : ''}${s ? ' :: ' + (TAREFA[s.state] || s.state) + (s.model ? ' (' + s.model + ')' : '') : ''}`);
     }
+    if (p.demanda) {
+      const est = formatarEstimativa(p);
+      if (est) console.log(`\n${est}`);
+    }
+  }
+  if (p.comparacaoEstimativa) {
+    const comp = formatarComparacao(p);
+    if (comp) console.log(`\n${comp}`);
   }
   for (const g of p.run?.gates || []) console.log(`\n>> CONFIRMAÇÃO PENDENTE [${g.gate}]: ${g.motivo}\n   node cli.mjs confirmar ${p.id} ${g.gate} sim|nao`);
   if (p.relatorio) console.log(`\nRelatório no cofre: ${p.relatorio}`);
@@ -142,6 +151,18 @@ export function formatarCotas(dados) {
     }
     const larg = tabela[0].map((_, i) => Math.max(...tabela.map((r) => r[i].length)));
     for (const r of tabela) out.push(r.map((c, i) => c.padEnd(larg[i])).join('  ').trimEnd());
+    const comSub = linhas.filter((l) => (l.estimativa?.porModelo && Object.keys(l.estimativa.porModelo).length) || (Array.isArray(l.estimativa?.submodelos) && l.estimativa.submodelos.length));
+    if (comSub.length) {
+      out.push('', 'Detalhamento por submodelo (1% da cota):');
+      for (const l of comSub) {
+        const mapa = l.estimativa.porModelo || Object.fromEntries((l.estimativa.submodelos || []).map((s) => [s.modelo || s.nome, s]));
+        const itens = Object.entries(mapa).map(([nome, info]) => {
+          const txt = typeof info === 'string' ? info : (info?.texto || `${fmtTokens(info?.entrada || 0)} ent / ${fmtTokens(info?.saida || 0)} sai`);
+          return `${nome}: ${txt}`;
+        });
+        if (itens.length) out.push(`  - ${l.nome}: ${itens.join(' | ')}`);
+      }
+    }
     out.push('', 'Nota: a estimativa por 1% soma o consumo local da máquina (logs do Claude Code e do Antigravity, além das tentativas do Delegar); uso em outro PC ou na web não aparece e distorce a conta.');
   }
   if (d.aviso) out.push(`Aviso: ${d.aviso}`);
@@ -335,6 +356,186 @@ export function formatarUso(dados, { projeto = false } = {}) {
   return out.join('\n');
 }
 
+function formatarTempo(seg) {
+  if (seg == null || !Number.isFinite(seg)) return '-';
+  if (seg < 60) return `${Math.round(seg)}s`;
+  const min = Math.round(seg / 60);
+  return `${min} min`;
+}
+
+function formatarErroRel(val, est, real) {
+  let v = val;
+  if (v == null && est != null && real != null && est > 0) {
+    v = (real - est) / est;
+  }
+  if (v == null || !Number.isFinite(v)) return '-';
+  let pct = v;
+  if (est != null && real != null && est > 0) {
+    const esperadoRazao = (real - est) / est;
+    if (Math.abs(v - esperadoRazao) < 0.05) {
+      pct = v * 100;
+    } else if (Math.abs(v / 100 - esperadoRazao) < 0.05) {
+      pct = v;
+    } else if (Math.abs(v) <= 5) {
+      pct = v * 100;
+    }
+  } else if (Math.abs(v) <= 5) {
+    pct = v * 100;
+  }
+  const arred = Math.round(pct);
+  const sinal = arred > 0 ? '+' : '';
+  return `${sinal}${arred}%`;
+}
+
+export function formatarEstimativa(p) {
+  const d = p?.demanda;
+  if (!d) return '';
+
+  const tot = d.total || d.totais || d;
+  let linhaResumo = d.linhaResumo;
+  if (!linhaResumo) {
+    const partesTot = [];
+    if (tot.entrada != null || tot.saida != null) {
+      let entSai = `${fmtTokens(tot.entrada)} ent / ${fmtTokens(tot.saida)} sai`;
+      if (Array.isArray(tot.faixaEntrada) && tot.faixaEntrada.length >= 2) {
+        entSai += ` (entre ${fmtTokens(tot.faixaEntrada[0])} e ${fmtTokens(tot.faixaEntrada[1])})`;
+      }
+      partesTot.push(entSai);
+    }
+    if (tot.usd != null) {
+      partesTot.push(`US$ ${fmtUsd(tot.usd)}`);
+    }
+    if (d.tempo?.totalSeg != null) {
+      const min = Math.round(d.tempo.totalSeg / 60);
+      partesTot.push(`~${min} min`);
+    }
+    if (d.recomendacao?.motivo) {
+      partesTot.push(d.recomendacao.motivo);
+    }
+    linhaResumo = `Demanda estimada: ${partesTot.join(' · ') || '-'}`;
+  }
+
+  const out = [linhaResumo];
+  const tarefas = Array.isArray(d.tarefas) ? d.tarefas : [];
+
+  for (const t of tarefas) {
+    const id = t.id || '-';
+    const mod = t.modeloAssumido || t.modeloPrincipal || t.modelo || '-';
+    const modeloStr = t.aproximado ? `${mod} (aproximado)` : mod;
+    const cat = t.demanda || t.categoria || t.tipo || '-';
+
+    let entStr = t.entradaEstimada != null ? `~${fmtTokens(t.entradaEstimada)} ent` : '';
+    let faixaStr = '';
+    if (Array.isArray(t.faixa?.entrada) && t.faixa.entrada.length >= 2) {
+      faixaStr = `entre ${fmtTokens(t.faixa.entrada[0])} e ${fmtTokens(t.faixa.entrada[1])}`;
+    }
+    let amostrasStr = '';
+    if (t.amostras != null) {
+      amostrasStr = `${t.amostras} amostra${t.amostras === 1 ? '' : 's'}`;
+    }
+    let parenteses = '';
+    if (faixaStr && amostrasStr) {
+      parenteses = `(${faixaStr}, ${amostrasStr})`;
+    } else if (faixaStr) {
+      parenteses = `(${faixaStr})`;
+    } else if (amostrasStr) {
+      parenteses = `(${amostrasStr})`;
+    }
+    let tokensParte = entStr;
+    if (parenteses) {
+      tokensParte = tokensParte ? `${tokensParte} ${parenteses}` : parenteses;
+    }
+
+    let tempoParte = '';
+    if (t.duracaoSegEstimada != null) {
+      const min = Math.round(t.duracaoSegEstimada / 60);
+      tempoParte = `~${min} min`;
+    }
+
+    const partes = [id, modeloStr, cat, tokensParte, tempoParte].filter(Boolean);
+    out.push('  - ' + partes.join(' · '));
+  }
+
+  return out.join('\n');
+}
+
+export function formatarComparacao(p) {
+  const c = p?.comparacaoEstimativa;
+  if (!c) return '';
+  const tarefas = Array.isArray(c.tarefas) ? c.tarefas : [];
+  if (!tarefas.length && !c.total) return '';
+
+  const cabecalho = [
+    'Tarefa',
+    'Entrada est.',
+    'Entrada real',
+    'Erro ent.',
+    'Saída est.',
+    'Saída real',
+    'Erro saí.',
+    'Tempo est.',
+    'Tempo real',
+    'Erro tempo',
+  ];
+  const linhas = [cabecalho];
+
+  for (const t of tarefas) {
+    linhas.push([
+      t.id || '-',
+      fmtTokens(t.estimado?.entrada),
+      fmtTokens(t.real?.entrada),
+      formatarErroRel(t.erroRel?.entrada, t.estimado?.entrada, t.real?.entrada),
+      fmtTokens(t.estimado?.saida),
+      fmtTokens(t.real?.saida),
+      formatarErroRel(t.erroRel?.saida, t.estimado?.saida, t.real?.saida),
+      formatarTempo(t.estimado?.duracaoSeg),
+      formatarTempo(t.real?.duracaoSeg),
+      formatarErroRel(t.erroRel?.duracaoSeg ?? t.erroRel?.tempo, t.estimado?.duracaoSeg, t.real?.duracaoSeg),
+    ]);
+  }
+
+  const tot = c.total || (tarefas.length > 0 ? {
+    estimado: {
+      entrada: tarefas.reduce((acc, t) => acc + (Number(t.estimado?.entrada) || 0), 0),
+      saida: tarefas.reduce((acc, t) => acc + (Number(t.estimado?.saida) || 0), 0),
+      duracaoSeg: tarefas.reduce((acc, t) => acc + (Number(t.estimado?.duracaoSeg) || 0), 0),
+    },
+    real: {
+      entrada: tarefas.reduce((acc, t) => acc + (Number(t.real?.entrada) || 0), 0),
+      saida: tarefas.reduce((acc, t) => acc + (Number(t.real?.saida) || 0), 0),
+      duracaoSeg: tarefas.reduce((acc, t) => acc + (Number(t.real?.duracaoSeg) || 0), 0),
+    },
+  } : null);
+
+  if (tot) {
+    linhas.push([
+      'Total',
+      fmtTokens(tot.estimado?.entrada),
+      fmtTokens(tot.real?.entrada),
+      formatarErroRel(tot.erroRel?.entrada, tot.estimado?.entrada, tot.real?.entrada),
+      fmtTokens(tot.estimado?.saida),
+      fmtTokens(tot.real?.saida),
+      formatarErroRel(tot.erroRel?.saida, tot.estimado?.saida, tot.real?.saida),
+      formatarTempo(tot.estimado?.duracaoSeg),
+      formatarTempo(tot.real?.duracaoSeg),
+      formatarErroRel(tot.erroRel?.duracaoSeg ?? tot.erroRel?.tempo, tot.estimado?.duracaoSeg, tot.real?.duracaoSeg),
+    ]);
+  }
+
+  return ['Estimado x real:', ...alinharTabela(linhas)].join('\n');
+}
+
+const ehPrincipal = (() => {
+  try {
+    const a = path.resolve(process.argv[1] || '').toLowerCase();
+    const b = fileURLToPath(import.meta.url).toLowerCase();
+    return a === b;
+  } catch {
+    return false;
+  }
+})();
+
+if (ehPrincipal) {
 const [cmd, ...rest] = process.argv.slice(2);
 const o = opts(rest);
 try {
@@ -343,8 +544,11 @@ try {
     case 'novo': {
       const pedido = o.arquivo ? fs.readFileSync(o.arquivo, 'utf8') : o._.join(' ');
       const custom = lerCustom(o.personalizado);
-      const p = await call('POST', '/api/projetos', { repo: o.repo, modo: custom || o.perfil ? 'personalizado' : o.modo || 'padrao', custom: o.perfil ? undefined : custom, perfil: o.perfil, velocidade: o.velocidade || 'auto', supervisao: o.acompanhamento || 'automatico', auto: !!o.auto, titulo: o.titulo, pedido });
-      console.log('Projeto criado e enviado ao planejador.'); mostrar(p, 0); break;
+      const body = { repo: o.repo, modo: custom || o.perfil ? 'personalizado' : o.modo || 'padrao', custom: o.perfil ? undefined : custom, perfil: o.perfil, velocidade: o.velocidade || 'auto', supervisao: o.acompanhamento || 'automatico', auto: !!o.auto, titulo: o.titulo, pedido };
+      if (o['agendar-planejamento']) body.planejarEm = o['agendar-planejamento'];
+      if (o['agendar-execucao']) body.executarEm = o['agendar-execucao'];
+      const p = await call('POST', '/api/projetos', body);
+      console.log(p.agendamento?.ativo ? `Projeto criado (${p.agendamento.texto}).` : 'Projeto criado e enviado ao planejador.'); mostrar(p, 0); break;
     }
     case 'msg': await call('POST', `/api/projetos/${o._[0]}/mensagem`, { texto: o.arquivo ? fs.readFileSync(o.arquivo, 'utf8') : o._.slice(1).join(' ') }); console.log('Mensagem enviada.'); break;
     case 'plano': await call('POST', `/api/projetos/${o._[0]}/gerar-plano`); console.log('Plano final pedido ao planejador.'); break;
@@ -461,7 +665,33 @@ try {
       for (const m of c.modelos) console.log(`  ${m.instalado ? ' ' : 'x'} ${m.id}${m.novo ? ' [novo]' : ''}${m.dica ? '  - ' + m.dica : ''}`);
       break;
     }
-    case 'status': for (const p of (await call('GET', '/api/projetos')).filter((x) => o.todos || !x.arquivado)) console.log(`${p.arquivado ? '[arquivado] ' : ''}${p.id}  ${p.estado}${p.ocupado ? '*' : ''}${p.gates ? ' (confirmação pendente)' : ''}  ${p.modoNome} (${p.velocidade || 'auto'})  ${p.titulo}`); break;
+    case 'agendar': {
+      const id = o._[0];
+      if (!id) throw new Error('Informe o id do projeto.');
+      const body = o.cancelar ? { cancelar: true } : { planejarEm: o.planejamento || null, executarEm: o.execucao || null };
+      const p = await call('POST', `/api/projetos/${id}/agendar`, body);
+      console.log(p.agendamento?.ativo ? `Agendamento atualizado: ${p.agendamento.texto}` : 'Agendamento cancelado.');
+      break;
+    }
+    case 'demanda': {
+      const id = o._[0];
+      if (!id) throw new Error('Informe o id do projeto.');
+      if (o.aplicar) {
+        const p = await call('POST', `/api/projetos/${id}/aplicar-ajuste-cota`, { politica: o.aplicar });
+        console.log(`Política '${o.aplicar}' aplicada.`);
+        mostrar(p, 0);
+      } else {
+        const p = await call('GET', `/api/projetos/${id}`);
+        if (!p.demanda) console.log('Sem plano ou demanda estimada para este projeto.');
+        else {
+          const d = p.demanda; const tot = d.totais || d;
+          console.log(`Demanda estimada: ${fmtTokens(tot.entrada)} ent / ${fmtTokens(tot.saida)} sai · US$ ${fmtUsd(tot.usd)}`);
+          if (d.recomendacao) console.log(`Recomendação (${d.recomendacao.estrategia || '-'}): ${d.recomendacao.motivo || ''}`);
+        }
+      }
+      break;
+    }
+    case 'status': for (const p of (await call('GET', '/api/projetos')).filter((x) => o.todos || !x.arquivado)) console.log(`${p.arquivado ? '[arquivado] ' : ''}${p.id}  ${p.estado}${p.ocupado ? '*' : ''}${p.gates ? ' (confirmação pendente)' : ''}${p.agendamento?.ativo ? ` [${p.agendamento.texto}]` : ''}  ${p.modoNome} (${p.velocidade || 'auto'})  ${p.titulo}`); break;
     case 'esperar': {
       const lim = Date.now() + (Number(o._[1]) || 60) * 60000; let p;
       do {
@@ -478,3 +708,4 @@ try {
     }
   }
 } catch (e) { console.error('Erro:', e.message); process.exit(1); }
+}

@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  carregarPrecos, precoDe, custoUsd, assinaturaDe, emBrl, idadeDias, atualizarPrecos, atualizarSeVencido, URL_LITELLM,
+  carregarPrecos, precoDe, razaoPrecoSaidaEntrada, custoUsd, assinaturaDe, emBrl, idadeDias, atualizarPrecos, atualizarSeVencido, URL_LITELLM,
 } from '../precos.mjs';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'delegar-precos-'));
@@ -57,9 +57,12 @@ function dirComTrabalho(modelosExtra = {}, resto = {}) {
 test('tabela versionada cobre os modelos do contrato', () => {
   const t = carregarPrecos({ dataDir: tmp() });
   for (const m of ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1', 'gemini-3.8-flash',
-    'gemini-4-argon', 'gemini-4-hydrogen', 'gpt-oss-120b']) assert.ok(precoDe(t, m), m);
+    'gemini-4-argon', 'gemini-4-hydrogen', 'gemini-4-neon', 'gpt-oss-120b']) assert.ok(precoDe(t, m), m);
   assert.equal(precoDe(t, 'claude-sonnet-5-5').entrada, 2);
   assert.equal(precoDe(t, 'claude-sonnet-5-5').saida, 10);
+  assert.equal(precoDe(t, 'gemini-4-neon').entrada, 3);
+  assert.equal(precoDe(t, 'gemini-4-neon').saida, 15);
+  assert.equal(precoDe(t, 'gemini-4-neon').cacheLido, 0.15);
   assert.ok(t.usdBrl > 0);
   assert.match(t.atualizado, /^\d{4}-\d{2}-\d{2}$/);
 });
@@ -69,7 +72,8 @@ test('todos os ids de modelos do Antigravity descobertos têm preço', () => {
   const ids = ['claude-opus-5-5-high', 'claude-opus-5-5-low', 'claude-opus-5-5-medium', 'claude-sonnet-5-5-high', 'claude-sonnet-5-5-low',
     'claude-sonnet-5-5-medium', 'gemini-3.8-flash-high', 'gemini-3.8-flash-low', 'gemini-3.8-flash-medium', 'gemini-4-argon-high',
     'gemini-4-argon-low', 'gemini-4-argon-medium', 'gemini-4-hydrogen-high', 'gemini-4-hydrogen-low', 'gemini-4-hydrogen-medium',
-    'gemini-4-hydrogen-xhigh', 'gemini-pro-orchestrator-g1-pro', 'gpt-oss-120b-medium'];
+    'gemini-4-hydrogen-xhigh', 'gemini-4-neon-high', 'gemini-4-neon-medium', 'gemini-4-neon-low', 'gemini-4-neon-xhigh',
+    'gemini-pro-orchestrator-g1-pro', 'gemini-pro-orchestrator-neon', 'gpt-oss-120b-medium'];
   for (const id of ids) assert.ok(precoDe(t, id), id);
 });
 
@@ -147,10 +151,24 @@ test('custoUsd: cacheGravado1h cobra o preço de 1 hora na parte informada', () 
   assert.ok(Math.abs(r.usd - 4) < 1e-9);
 });
 
-test('custoUsd: origem gratuito vale 0', () => {
+test('custoUsd: gratuito sem preço cadastrado vale 0', () => {
   const t = carregarPrecos({ dataDir: tmp() });
-  assert.deepEqual(custoUsd(t, { provedor: 'opencode', modelo: 'opencode/glm-5.3-flash-free', entrada: 5e6, saida: 5e6, cacheLido: 0, cacheGravado: 0, custoCliUsd: null }),
+  assert.deepEqual(custoUsd(t, { provedor: 'opencode', modelo: 'opencode/iceman-free', entrada: 5e6, saida: 5e6, cacheLido: 0, cacheGravado: 0, custoCliUsd: null }),
     { usd: 0, origem: 'gratuito' });
+});
+
+test('custoUsd: gratuito com preço cadastrado estima o equivalente de API e ignora cost 0 da CLI', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  for (const [modelo, esperado] of [['opencode/glm-5.3-flash-free', 0.1 + 0.4], ['opencode:opencode/minimax-m3.1-flash-free', 0.3 + 1.2], ['opencode/deepseek-v4.1-flash-free', 0.14 + 0.28]]) {
+    for (const custoCliUsd of [0, null]) {
+      const r = custoUsd(t, { provedor: 'opencode', modelo, entrada: 1e6, saida: 1e6, cacheLido: 0, cacheGravado: 0, custoCliUsd });
+      assert.equal(r.origem, 'equivalente-api');
+      assert.ok(Math.abs(r.usd - esperado) < 1e-9, `${modelo}: ${r.usd}`);
+    }
+  }
+  // big-pickle segue gratuito, e modelo pago com cost da CLI mantém o cost.
+  assert.equal(custoUsd(t, { modelo: 'opencode/big-pickle', entrada: 1e6, saida: 1e6, custoCliUsd: null }).origem, 'gratuito');
+  assert.deepEqual(custoUsd(t, { modelo: 'opencode/glm-5.3-flash', entrada: 1e6, custoCliUsd: 0.5 }), { usd: 0.5, origem: 'cli' });
 });
 
 test('custoUsd: origem aproximado calcula e marca', () => {
@@ -209,6 +227,40 @@ test('cópia de trabalho sobrepõe a versionada; modelos só da versionada conti
   } finally { limpa(dir); }
 });
 
+test('resolução com prefixo de provedor e sufixo de esforço', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  assert.equal(precoDe(t, 'agy:gemini-4-hydrogen-medium')?.chave, 'gemini-4-hydrogen');
+  assert.equal(precoDe(t, 'agy:gemini-4-argon-low')?.chave, 'gemini-4-argon');
+  assert.equal(precoDe(t, 'claude:haiku')?.chave, 'claude-haiku-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'claude:opus')?.chave, 'claude-opus-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet@high')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'opencode:opencode/glm-5.3-flash-free')?.gratuito, true);
+});
+
+test('razaoPrecoSaidaEntrada retorna razões corretas com e sem prefixo/sufixo', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  const r = razaoPrecoSaidaEntrada(t, 'claude:sonnet@high');
+  assert.ok(r);
+  assert.equal(r.entrada, 2);
+  assert.equal(r.saida, 10);
+  assert.equal(r.razaoSaida, 5);
+  assert.ok(Math.abs(r.razaoCacheLido - 0.05) < 1e-9);
+  assert.ok(Math.abs(r.razaoCacheGravado - 1.25) < 1e-9);
+
+  const g = razaoPrecoSaidaEntrada(t, 'agy:gemini-4-hydrogen-medium');
+  assert.ok(g);
+  assert.equal(g.razaoSaida, g.saida / g.entrada);
+
+  const free = razaoPrecoSaidaEntrada(t, 'opencode:opencode/glm-5.3-flash-free');
+  assert.deepEqual(free, {
+    entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0,
+    razaoSaida: 0, razaoCacheLido: 0, razaoCacheGravado: 0,
+  });
+
+  assert.equal(razaoPrecoSaidaEntrada(t, 'modelo-inexistente'), null);
+});
+
 test('modelo que só existe na cópia de trabalho entra; cópia inválida é ignorada', () => {
   const dir = tmp();
   try {
@@ -221,6 +273,40 @@ test('modelo que só existe na cópia de trabalho entra; cópia inválida é ign
     fs.writeFileSync(path.join(dir, 'precos.json'), JSON.stringify({ modelos: { x: { entrada: 1, saida: 2 } }, usdBrl: 'abc' }));
     assert.equal(carregarPrecos({ dataDir: dir }).origem, 'versionada');
   } finally { limpa(dir); }
+});
+
+test('resolução com prefixo de provedor e sufixo de esforço', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  assert.equal(precoDe(t, 'agy:gemini-4-hydrogen-medium')?.chave, 'gemini-4-hydrogen');
+  assert.equal(precoDe(t, 'agy:gemini-4-argon-low')?.chave, 'gemini-4-argon');
+  assert.equal(precoDe(t, 'claude:haiku')?.chave, 'claude-haiku-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'claude:opus')?.chave, 'claude-opus-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet@high')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'opencode:opencode/glm-5.3-flash-free')?.gratuito, true);
+});
+
+test('razaoPrecoSaidaEntrada retorna razões corretas com e sem prefixo/sufixo', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  const r = razaoPrecoSaidaEntrada(t, 'claude:sonnet@high');
+  assert.ok(r);
+  assert.equal(r.entrada, 2);
+  assert.equal(r.saida, 10);
+  assert.equal(r.razaoSaida, 5);
+  assert.ok(Math.abs(r.razaoCacheLido - 0.05) < 1e-9);
+  assert.ok(Math.abs(r.razaoCacheGravado - 1.25) < 1e-9);
+
+  const g = razaoPrecoSaidaEntrada(t, 'agy:gemini-4-hydrogen-medium');
+  assert.ok(g);
+  assert.equal(g.razaoSaida, g.saida / g.entrada);
+
+  const free = razaoPrecoSaidaEntrada(t, 'opencode:opencode/glm-5.3-flash-free');
+  assert.deepEqual(free, {
+    entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0,
+    razaoSaida: 0, razaoCacheLido: 0, razaoCacheGravado: 0,
+  });
+
+  assert.equal(razaoPrecoSaidaEntrada(t, 'modelo-inexistente'), null);
 });
 
 // ------------------------------------------------------------------ atualização
@@ -246,6 +332,40 @@ test('atualiza os mapeados, grava a data e a cópia de trabalho', async () => {
   } finally { limpa(dir); }
 });
 
+test('resolução com prefixo de provedor e sufixo de esforço', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  assert.equal(precoDe(t, 'agy:gemini-4-hydrogen-medium')?.chave, 'gemini-4-hydrogen');
+  assert.equal(precoDe(t, 'agy:gemini-4-argon-low')?.chave, 'gemini-4-argon');
+  assert.equal(precoDe(t, 'claude:haiku')?.chave, 'claude-haiku-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'claude:opus')?.chave, 'claude-opus-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet@high')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'opencode:opencode/glm-5.3-flash-free')?.gratuito, true);
+});
+
+test('razaoPrecoSaidaEntrada retorna razões corretas com e sem prefixo/sufixo', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  const r = razaoPrecoSaidaEntrada(t, 'claude:sonnet@high');
+  assert.ok(r);
+  assert.equal(r.entrada, 2);
+  assert.equal(r.saida, 10);
+  assert.equal(r.razaoSaida, 5);
+  assert.ok(Math.abs(r.razaoCacheLido - 0.05) < 1e-9);
+  assert.ok(Math.abs(r.razaoCacheGravado - 1.25) < 1e-9);
+
+  const g = razaoPrecoSaidaEntrada(t, 'agy:gemini-4-hydrogen-medium');
+  assert.ok(g);
+  assert.equal(g.razaoSaida, g.saida / g.entrada);
+
+  const free = razaoPrecoSaidaEntrada(t, 'opencode:opencode/glm-5.3-flash-free');
+  assert.deepEqual(free, {
+    entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0,
+    razaoSaida: 0, razaoCacheLido: 0, razaoCacheGravado: 0,
+  });
+
+  assert.equal(razaoPrecoSaidaEntrada(t, 'modelo-inexistente'), null);
+});
+
 test('GET sem dado nenhum: só User-Agent genérico, sem query, sem cookie', async () => {
   const dir = tmp();
   try {
@@ -258,6 +378,40 @@ test('GET sem dado nenhum: só User-Agent genérico, sem query, sem cookie', asy
     assert.equal(visto.o.body, undefined);
     assert.ok(visto.o.signal);
   } finally { limpa(dir); }
+});
+
+test('resolução com prefixo de provedor e sufixo de esforço', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  assert.equal(precoDe(t, 'agy:gemini-4-hydrogen-medium')?.chave, 'gemini-4-hydrogen');
+  assert.equal(precoDe(t, 'agy:gemini-4-argon-low')?.chave, 'gemini-4-argon');
+  assert.equal(precoDe(t, 'claude:haiku')?.chave, 'claude-haiku-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'claude:opus')?.chave, 'claude-opus-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet@high')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'opencode:opencode/glm-5.3-flash-free')?.gratuito, true);
+});
+
+test('razaoPrecoSaidaEntrada retorna razões corretas com e sem prefixo/sufixo', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  const r = razaoPrecoSaidaEntrada(t, 'claude:sonnet@high');
+  assert.ok(r);
+  assert.equal(r.entrada, 2);
+  assert.equal(r.saida, 10);
+  assert.equal(r.razaoSaida, 5);
+  assert.ok(Math.abs(r.razaoCacheLido - 0.05) < 1e-9);
+  assert.ok(Math.abs(r.razaoCacheGravado - 1.25) < 1e-9);
+
+  const g = razaoPrecoSaidaEntrada(t, 'agy:gemini-4-hydrogen-medium');
+  assert.ok(g);
+  assert.equal(g.razaoSaida, g.saida / g.entrada);
+
+  const free = razaoPrecoSaidaEntrada(t, 'opencode:opencode/glm-5.3-flash-free');
+  assert.deepEqual(free, {
+    entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0,
+    razaoSaida: 0, razaoCacheLido: 0, razaoCacheGravado: 0,
+  });
+
+  assert.equal(razaoPrecoSaidaEntrada(t, 'modelo-inexistente'), null);
 });
 
 test('preserva modelo manual, usdBrl, aliases e itens sem mapeamento', async () => {
@@ -277,6 +431,40 @@ test('preserva modelo manual, usdBrl, aliases e itens sem mapeamento', async () 
   } finally { limpa(dir); }
 });
 
+test('resolução com prefixo de provedor e sufixo de esforço', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  assert.equal(precoDe(t, 'agy:gemini-4-hydrogen-medium')?.chave, 'gemini-4-hydrogen');
+  assert.equal(precoDe(t, 'agy:gemini-4-argon-low')?.chave, 'gemini-4-argon');
+  assert.equal(precoDe(t, 'claude:haiku')?.chave, 'claude-haiku-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'claude:opus')?.chave, 'claude-opus-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet@high')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'opencode:opencode/glm-5.3-flash-free')?.gratuito, true);
+});
+
+test('razaoPrecoSaidaEntrada retorna razões corretas com e sem prefixo/sufixo', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  const r = razaoPrecoSaidaEntrada(t, 'claude:sonnet@high');
+  assert.ok(r);
+  assert.equal(r.entrada, 2);
+  assert.equal(r.saida, 10);
+  assert.equal(r.razaoSaida, 5);
+  assert.ok(Math.abs(r.razaoCacheLido - 0.05) < 1e-9);
+  assert.ok(Math.abs(r.razaoCacheGravado - 1.25) < 1e-9);
+
+  const g = razaoPrecoSaidaEntrada(t, 'agy:gemini-4-hydrogen-medium');
+  assert.ok(g);
+  assert.equal(g.razaoSaida, g.saida / g.entrada);
+
+  const free = razaoPrecoSaidaEntrada(t, 'opencode:opencode/glm-5.3-flash-free');
+  assert.deepEqual(free, {
+    entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0,
+    razaoSaida: 0, razaoCacheLido: 0, razaoCacheGravado: 0,
+  });
+
+  assert.equal(razaoPrecoSaidaEntrada(t, 'modelo-inexistente'), null);
+});
+
 test('aproximado com parente acompanha a atualização do parente', async () => {
   const dir = tmp();
   try {
@@ -286,6 +474,40 @@ test('aproximado com parente acompanha a atualização do parente', async () => 
     assert.equal(r.tabela.modelos['gemini-pro-orchestrator-g1-pro'].entrada, 5);
     assert.equal(precoDe(r.tabela, 'gemini-pro-orchestrator-g1-pro').saida, 20);
   } finally { limpa(dir); }
+});
+
+test('resolução com prefixo de provedor e sufixo de esforço', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  assert.equal(precoDe(t, 'agy:gemini-4-hydrogen-medium')?.chave, 'gemini-4-hydrogen');
+  assert.equal(precoDe(t, 'agy:gemini-4-argon-low')?.chave, 'gemini-4-argon');
+  assert.equal(precoDe(t, 'claude:haiku')?.chave, 'claude-haiku-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'claude:opus')?.chave, 'claude-opus-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet@high')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'opencode:opencode/glm-5.3-flash-free')?.gratuito, true);
+});
+
+test('razaoPrecoSaidaEntrada retorna razões corretas com e sem prefixo/sufixo', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  const r = razaoPrecoSaidaEntrada(t, 'claude:sonnet@high');
+  assert.ok(r);
+  assert.equal(r.entrada, 2);
+  assert.equal(r.saida, 10);
+  assert.equal(r.razaoSaida, 5);
+  assert.ok(Math.abs(r.razaoCacheLido - 0.05) < 1e-9);
+  assert.ok(Math.abs(r.razaoCacheGravado - 1.25) < 1e-9);
+
+  const g = razaoPrecoSaidaEntrada(t, 'agy:gemini-4-hydrogen-medium');
+  assert.ok(g);
+  assert.equal(g.razaoSaida, g.saida / g.entrada);
+
+  const free = razaoPrecoSaidaEntrada(t, 'opencode:opencode/glm-5.3-flash-free');
+  assert.deepEqual(free, {
+    entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0,
+    razaoSaida: 0, razaoCacheLido: 0, razaoCacheGravado: 0,
+  });
+
+  assert.equal(razaoPrecoSaidaEntrada(t, 'modelo-inexistente'), null);
 });
 
 test('ignora valores inválidos (negativo, enorme, texto, NaN) e mantém o preço anterior', async () => {
@@ -310,6 +532,40 @@ test('ignora valores inválidos (negativo, enorme, texto, NaN) e mantém o preç
   } finally { limpa(dir); }
 });
 
+test('resolução com prefixo de provedor e sufixo de esforço', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  assert.equal(precoDe(t, 'agy:gemini-4-hydrogen-medium')?.chave, 'gemini-4-hydrogen');
+  assert.equal(precoDe(t, 'agy:gemini-4-argon-low')?.chave, 'gemini-4-argon');
+  assert.equal(precoDe(t, 'claude:haiku')?.chave, 'claude-haiku-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'claude:opus')?.chave, 'claude-opus-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet@high')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'opencode:opencode/glm-5.3-flash-free')?.gratuito, true);
+});
+
+test('razaoPrecoSaidaEntrada retorna razões corretas com e sem prefixo/sufixo', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  const r = razaoPrecoSaidaEntrada(t, 'claude:sonnet@high');
+  assert.ok(r);
+  assert.equal(r.entrada, 2);
+  assert.equal(r.saida, 10);
+  assert.equal(r.razaoSaida, 5);
+  assert.ok(Math.abs(r.razaoCacheLido - 0.05) < 1e-9);
+  assert.ok(Math.abs(r.razaoCacheGravado - 1.25) < 1e-9);
+
+  const g = razaoPrecoSaidaEntrada(t, 'agy:gemini-4-hydrogen-medium');
+  assert.ok(g);
+  assert.equal(g.razaoSaida, g.saida / g.entrada);
+
+  const free = razaoPrecoSaidaEntrada(t, 'opencode:opencode/glm-5.3-flash-free');
+  assert.deepEqual(free, {
+    entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0,
+    razaoSaida: 0, razaoCacheLido: 0, razaoCacheGravado: 0,
+  });
+
+  assert.equal(razaoPrecoSaidaEntrada(t, 'modelo-inexistente'), null);
+});
+
 test('recusa resposta maior que o limite (stream e content-length) e não grava', async () => {
   const dir = tmp();
   try {
@@ -321,6 +577,40 @@ test('recusa resposta maior que o limite (stream e content-length) e não grava'
     assert.equal(r2.ok, false);
     assert.ok(!fs.existsSync(path.join(dir, 'precos.json')));
   } finally { limpa(dir); }
+});
+
+test('resolução com prefixo de provedor e sufixo de esforço', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  assert.equal(precoDe(t, 'agy:gemini-4-hydrogen-medium')?.chave, 'gemini-4-hydrogen');
+  assert.equal(precoDe(t, 'agy:gemini-4-argon-low')?.chave, 'gemini-4-argon');
+  assert.equal(precoDe(t, 'claude:haiku')?.chave, 'claude-haiku-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'claude:opus')?.chave, 'claude-opus-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet@high')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'opencode:opencode/glm-5.3-flash-free')?.gratuito, true);
+});
+
+test('razaoPrecoSaidaEntrada retorna razões corretas com e sem prefixo/sufixo', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  const r = razaoPrecoSaidaEntrada(t, 'claude:sonnet@high');
+  assert.ok(r);
+  assert.equal(r.entrada, 2);
+  assert.equal(r.saida, 10);
+  assert.equal(r.razaoSaida, 5);
+  assert.ok(Math.abs(r.razaoCacheLido - 0.05) < 1e-9);
+  assert.ok(Math.abs(r.razaoCacheGravado - 1.25) < 1e-9);
+
+  const g = razaoPrecoSaidaEntrada(t, 'agy:gemini-4-hydrogen-medium');
+  assert.ok(g);
+  assert.equal(g.razaoSaida, g.saida / g.entrada);
+
+  const free = razaoPrecoSaidaEntrada(t, 'opencode:opencode/glm-5.3-flash-free');
+  assert.deepEqual(free, {
+    entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0,
+    razaoSaida: 0, razaoCacheLido: 0, razaoCacheGravado: 0,
+  });
+
+  assert.equal(razaoPrecoSaidaEntrada(t, 'modelo-inexistente'), null);
 });
 
 test('o stream é cancelado ao passar do limite', async () => {
@@ -338,6 +628,40 @@ test('o stream é cancelado ao passar do limite', async () => {
   } finally { limpa(dir); }
 });
 
+test('resolução com prefixo de provedor e sufixo de esforço', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  assert.equal(precoDe(t, 'agy:gemini-4-hydrogen-medium')?.chave, 'gemini-4-hydrogen');
+  assert.equal(precoDe(t, 'agy:gemini-4-argon-low')?.chave, 'gemini-4-argon');
+  assert.equal(precoDe(t, 'claude:haiku')?.chave, 'claude-haiku-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'claude:opus')?.chave, 'claude-opus-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet@high')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'opencode:opencode/glm-5.3-flash-free')?.gratuito, true);
+});
+
+test('razaoPrecoSaidaEntrada retorna razões corretas com e sem prefixo/sufixo', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  const r = razaoPrecoSaidaEntrada(t, 'claude:sonnet@high');
+  assert.ok(r);
+  assert.equal(r.entrada, 2);
+  assert.equal(r.saida, 10);
+  assert.equal(r.razaoSaida, 5);
+  assert.ok(Math.abs(r.razaoCacheLido - 0.05) < 1e-9);
+  assert.ok(Math.abs(r.razaoCacheGravado - 1.25) < 1e-9);
+
+  const g = razaoPrecoSaidaEntrada(t, 'agy:gemini-4-hydrogen-medium');
+  assert.ok(g);
+  assert.equal(g.razaoSaida, g.saida / g.entrada);
+
+  const free = razaoPrecoSaidaEntrada(t, 'opencode:opencode/glm-5.3-flash-free');
+  assert.deepEqual(free, {
+    entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0,
+    razaoSaida: 0, razaoCacheLido: 0, razaoCacheGravado: 0,
+  });
+
+  assert.equal(razaoPrecoSaidaEntrada(t, 'modelo-inexistente'), null);
+});
+
 test('timeout mantém a tabela anterior e não grava', async () => {
   const dir = tmp();
   try {
@@ -350,6 +674,40 @@ test('timeout mantém a tabela anterior e não grava', async () => {
   } finally { limpa(dir); }
 });
 
+test('resolução com prefixo de provedor e sufixo de esforço', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  assert.equal(precoDe(t, 'agy:gemini-4-hydrogen-medium')?.chave, 'gemini-4-hydrogen');
+  assert.equal(precoDe(t, 'agy:gemini-4-argon-low')?.chave, 'gemini-4-argon');
+  assert.equal(precoDe(t, 'claude:haiku')?.chave, 'claude-haiku-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'claude:opus')?.chave, 'claude-opus-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet@high')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'opencode:opencode/glm-5.3-flash-free')?.gratuito, true);
+});
+
+test('razaoPrecoSaidaEntrada retorna razões corretas com e sem prefixo/sufixo', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  const r = razaoPrecoSaidaEntrada(t, 'claude:sonnet@high');
+  assert.ok(r);
+  assert.equal(r.entrada, 2);
+  assert.equal(r.saida, 10);
+  assert.equal(r.razaoSaida, 5);
+  assert.ok(Math.abs(r.razaoCacheLido - 0.05) < 1e-9);
+  assert.ok(Math.abs(r.razaoCacheGravado - 1.25) < 1e-9);
+
+  const g = razaoPrecoSaidaEntrada(t, 'agy:gemini-4-hydrogen-medium');
+  assert.ok(g);
+  assert.equal(g.razaoSaida, g.saida / g.entrada);
+
+  const free = razaoPrecoSaidaEntrada(t, 'opencode:opencode/glm-5.3-flash-free');
+  assert.deepEqual(free, {
+    entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0,
+    razaoSaida: 0, razaoCacheLido: 0, razaoCacheGravado: 0,
+  });
+
+  assert.equal(razaoPrecoSaidaEntrada(t, 'modelo-inexistente'), null);
+});
+
 test('corpo que trava no meio também estoura o timeout', async () => {
   const dir = tmp();
   try {
@@ -358,6 +716,40 @@ test('corpo que trava no meio também estoura o timeout', async () => {
     assert.equal(r.ok, false);
     assert.match(r.aviso, /tempo/);
   } finally { limpa(dir); }
+});
+
+test('resolução com prefixo de provedor e sufixo de esforço', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  assert.equal(precoDe(t, 'agy:gemini-4-hydrogen-medium')?.chave, 'gemini-4-hydrogen');
+  assert.equal(precoDe(t, 'agy:gemini-4-argon-low')?.chave, 'gemini-4-argon');
+  assert.equal(precoDe(t, 'claude:haiku')?.chave, 'claude-haiku-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'claude:opus')?.chave, 'claude-opus-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet@high')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'opencode:opencode/glm-5.3-flash-free')?.gratuito, true);
+});
+
+test('razaoPrecoSaidaEntrada retorna razões corretas com e sem prefixo/sufixo', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  const r = razaoPrecoSaidaEntrada(t, 'claude:sonnet@high');
+  assert.ok(r);
+  assert.equal(r.entrada, 2);
+  assert.equal(r.saida, 10);
+  assert.equal(r.razaoSaida, 5);
+  assert.ok(Math.abs(r.razaoCacheLido - 0.05) < 1e-9);
+  assert.ok(Math.abs(r.razaoCacheGravado - 1.25) < 1e-9);
+
+  const g = razaoPrecoSaidaEntrada(t, 'agy:gemini-4-hydrogen-medium');
+  assert.ok(g);
+  assert.equal(g.razaoSaida, g.saida / g.entrada);
+
+  const free = razaoPrecoSaidaEntrada(t, 'opencode:opencode/glm-5.3-flash-free');
+  assert.deepEqual(free, {
+    entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0,
+    razaoSaida: 0, razaoCacheLido: 0, razaoCacheGravado: 0,
+  });
+
+  assert.equal(razaoPrecoSaidaEntrada(t, 'modelo-inexistente'), null);
 });
 
 test('erro de rede, status ruim, JSON quebrado e JSON sem os modelos mantêm a tabela', async () => {
@@ -380,6 +772,40 @@ test('erro de rede, status ruim, JSON quebrado e JSON sem os modelos mantêm a t
   } finally { limpa(dir); }
 });
 
+test('resolução com prefixo de provedor e sufixo de esforço', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  assert.equal(precoDe(t, 'agy:gemini-4-hydrogen-medium')?.chave, 'gemini-4-hydrogen');
+  assert.equal(precoDe(t, 'agy:gemini-4-argon-low')?.chave, 'gemini-4-argon');
+  assert.equal(precoDe(t, 'claude:haiku')?.chave, 'claude-haiku-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'claude:opus')?.chave, 'claude-opus-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet@high')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'opencode:opencode/glm-5.3-flash-free')?.gratuito, true);
+});
+
+test('razaoPrecoSaidaEntrada retorna razões corretas com e sem prefixo/sufixo', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  const r = razaoPrecoSaidaEntrada(t, 'claude:sonnet@high');
+  assert.ok(r);
+  assert.equal(r.entrada, 2);
+  assert.equal(r.saida, 10);
+  assert.equal(r.razaoSaida, 5);
+  assert.ok(Math.abs(r.razaoCacheLido - 0.05) < 1e-9);
+  assert.ok(Math.abs(r.razaoCacheGravado - 1.25) < 1e-9);
+
+  const g = razaoPrecoSaidaEntrada(t, 'agy:gemini-4-hydrogen-medium');
+  assert.ok(g);
+  assert.equal(g.razaoSaida, g.saida / g.entrada);
+
+  const free = razaoPrecoSaidaEntrada(t, 'opencode:opencode/glm-5.3-flash-free');
+  assert.deepEqual(free, {
+    entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0,
+    razaoSaida: 0, razaoCacheLido: 0, razaoCacheGravado: 0,
+  });
+
+  assert.equal(razaoPrecoSaidaEntrada(t, 'modelo-inexistente'), null);
+});
+
 test('URL que não é https é recusada sem chamar a rede', async () => {
   const dir = tmp();
   try {
@@ -388,6 +814,40 @@ test('URL que não é https é recusada sem chamar a rede', async () => {
     assert.equal(r.ok, false);
     assert.equal(chamou, false);
   } finally { limpa(dir); }
+});
+
+test('resolução com prefixo de provedor e sufixo de esforço', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  assert.equal(precoDe(t, 'agy:gemini-4-hydrogen-medium')?.chave, 'gemini-4-hydrogen');
+  assert.equal(precoDe(t, 'agy:gemini-4-argon-low')?.chave, 'gemini-4-argon');
+  assert.equal(precoDe(t, 'claude:haiku')?.chave, 'claude-haiku-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'claude:opus')?.chave, 'claude-opus-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet@high')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'opencode:opencode/glm-5.3-flash-free')?.gratuito, true);
+});
+
+test('razaoPrecoSaidaEntrada retorna razões corretas com e sem prefixo/sufixo', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  const r = razaoPrecoSaidaEntrada(t, 'claude:sonnet@high');
+  assert.ok(r);
+  assert.equal(r.entrada, 2);
+  assert.equal(r.saida, 10);
+  assert.equal(r.razaoSaida, 5);
+  assert.ok(Math.abs(r.razaoCacheLido - 0.05) < 1e-9);
+  assert.ok(Math.abs(r.razaoCacheGravado - 1.25) < 1e-9);
+
+  const g = razaoPrecoSaidaEntrada(t, 'agy:gemini-4-hydrogen-medium');
+  assert.ok(g);
+  assert.equal(g.razaoSaida, g.saida / g.entrada);
+
+  const free = razaoPrecoSaidaEntrada(t, 'opencode:opencode/glm-5.3-flash-free');
+  assert.deepEqual(free, {
+    entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0,
+    razaoSaida: 0, razaoCacheLido: 0, razaoCacheGravado: 0,
+  });
+
+  assert.equal(razaoPrecoSaidaEntrada(t, 'modelo-inexistente'), null);
 });
 
 test('DELEGAR_PRECOS_URL troca a URL padrão', async () => {
@@ -423,6 +883,40 @@ test('atualizarSeVencido: tabela com até 30 dias não baixa; com mais de 30 bai
   } finally { limpa(dir); }
 });
 
+test('resolução com prefixo de provedor e sufixo de esforço', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  assert.equal(precoDe(t, 'agy:gemini-4-hydrogen-medium')?.chave, 'gemini-4-hydrogen');
+  assert.equal(precoDe(t, 'agy:gemini-4-argon-low')?.chave, 'gemini-4-argon');
+  assert.equal(precoDe(t, 'claude:haiku')?.chave, 'claude-haiku-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'claude:opus')?.chave, 'claude-opus-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet@high')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'opencode:opencode/glm-5.3-flash-free')?.gratuito, true);
+});
+
+test('razaoPrecoSaidaEntrada retorna razões corretas com e sem prefixo/sufixo', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  const r = razaoPrecoSaidaEntrada(t, 'claude:sonnet@high');
+  assert.ok(r);
+  assert.equal(r.entrada, 2);
+  assert.equal(r.saida, 10);
+  assert.equal(r.razaoSaida, 5);
+  assert.ok(Math.abs(r.razaoCacheLido - 0.05) < 1e-9);
+  assert.ok(Math.abs(r.razaoCacheGravado - 1.25) < 1e-9);
+
+  const g = razaoPrecoSaidaEntrada(t, 'agy:gemini-4-hydrogen-medium');
+  assert.ok(g);
+  assert.equal(g.razaoSaida, g.saida / g.entrada);
+
+  const free = razaoPrecoSaidaEntrada(t, 'opencode:opencode/glm-5.3-flash-free');
+  assert.deepEqual(free, {
+    entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0,
+    razaoSaida: 0, razaoCacheLido: 0, razaoCacheGravado: 0,
+  });
+
+  assert.equal(razaoPrecoSaidaEntrada(t, 'modelo-inexistente'), null);
+});
+
 test('atualizarSeVencido: DELEGAR_PRECOS_OFFLINE=1 nunca baixa', async () => {
   const dir = dirComTrabalho({}, { atualizado: '2020-01-01' });
   const antes = process.env.DELEGAR_PRECOS_OFFLINE;
@@ -450,4 +944,38 @@ test('atualizarSeVencido: tabela sem data conta como vencida e erro de rede não
     assert.ok(r.aviso);
     assert.ok(r.tabela);
   } finally { limpa(dir); }
+});
+
+test('resolução com prefixo de provedor e sufixo de esforço', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  assert.equal(precoDe(t, 'agy:gemini-4-hydrogen-medium')?.chave, 'gemini-4-hydrogen');
+  assert.equal(precoDe(t, 'agy:gemini-4-argon-low')?.chave, 'gemini-4-argon');
+  assert.equal(precoDe(t, 'claude:haiku')?.chave, 'claude-haiku-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'claude:opus')?.chave, 'claude-opus-5-5');
+  assert.equal(precoDe(t, 'claude:sonnet@high')?.chave, 'claude-sonnet-5-5');
+  assert.equal(precoDe(t, 'opencode:opencode/glm-5.3-flash-free')?.gratuito, true);
+});
+
+test('razaoPrecoSaidaEntrada retorna razões corretas com e sem prefixo/sufixo', () => {
+  const t = carregarPrecos({ dataDir: tmp() });
+  const r = razaoPrecoSaidaEntrada(t, 'claude:sonnet@high');
+  assert.ok(r);
+  assert.equal(r.entrada, 2);
+  assert.equal(r.saida, 10);
+  assert.equal(r.razaoSaida, 5);
+  assert.ok(Math.abs(r.razaoCacheLido - 0.05) < 1e-9);
+  assert.ok(Math.abs(r.razaoCacheGravado - 1.25) < 1e-9);
+
+  const g = razaoPrecoSaidaEntrada(t, 'agy:gemini-4-hydrogen-medium');
+  assert.ok(g);
+  assert.equal(g.razaoSaida, g.saida / g.entrada);
+
+  const free = razaoPrecoSaidaEntrada(t, 'opencode:opencode/glm-5.3-flash-free');
+  assert.deepEqual(free, {
+    entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0,
+    razaoSaida: 0, razaoCacheLido: 0, razaoCacheGravado: 0,
+  });
+
+  assert.equal(razaoPrecoSaidaEntrada(t, 'modelo-inexistente'), null);
 });

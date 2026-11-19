@@ -55,9 +55,30 @@ test('agy: primeiro token da linha; claude devolve vazio', () => {
   assert.deepEqual(analisarSaida('claude', 'opus\nsonnet'), []);
 });
 
-test('no máximo 400 ids', () => {
-  const texto = Array.from({ length: 600 }, (_, i) => `opencode/m${i}-free`).join('\n');
-  assert.equal(analisarSaida('opencode', texto).length, 400);
+test('no máximo 2000 ids', () => {
+  const texto = Array.from({ length: 2600 }, (_, i) => `opencode/m${i}-free`).join('\n');
+  assert.equal(analisarSaida('opencode', texto).length, 2000);
+});
+
+test('catálogo do agy mostra só o que a última listagem trouxe: some o fixo que saiu, entra o novo (caso Carbon/Neon de 19/11)', async () => {
+  const listagem = 'gemini-4-hydrogen-low  H\ngemini-4-neon-low  Neon (Low)\n';
+  await iniciarDescoberta({ dataDir: dir, provedores: { agy: 'agy-falso.exe' }, executar: async () => listagem });
+  const ids = catalogo().modelos.filter((m) => m.provedor === 'agy').map((m) => m.id);
+  assert.ok(ids.includes('agy:gemini-4-neon-low'), ids.join(' '));
+  assert.ok(ids.includes('agy:gemini-4-hydrogen-low'));
+  assert.ok(!ids.some((id) => id.includes('carbon')), ids.join(' '));
+  assert.ok(lerArq().ultimaOk.agy);
+});
+
+test('muitos modelos do opencode não expulsam o modelo novo do agy', async () => {
+  const oc = Array.from({ length: 2500 }, (_, i) => `openrouter/x/m${i}`).join('\n');
+  await iniciarDescoberta({ dataDir: dir, provedores: PROV, executar: async (prov) => (prov === 'agy' ? 'gemini-4-neon-low  N\n' : oc) });
+  assert.ok(catalogo().modelos.some((m) => m.id === 'agy:gemini-4-neon-low'));
+});
+
+test('listagem do agy com erro não esconde os modelos fixos', async () => {
+  await iniciarDescoberta({ dataDir: dir, provedores: { agy: 'agy-falso.exe' }, executar: async () => { throw new Error('falhou'); } });
+  assert.ok(catalogo().modelos.some((m) => m.id === 'agy:gemini-4-argon-low'));
 });
 
 test('agy falha e opencode responde: erro só do agy', async () => {

@@ -11,8 +11,32 @@ import { entradaValida, QUOTA_RE, DESESPERO, adaptar, catalogo, detectar, desesp
 import { criarPerfis, validarNome } from './perfis.mjs';
 import { linhasDeCotas, cotasDoProjeto } from './cotas.mjs';
 import { registrarHistoricoCota, lerHistoricoCotas, coletarTentativasUso, estimarTokensPorCota } from './cotas-estimativa.mjs';
-import { modeloSemEsforco, usoClaudeJson, usoOpencode, usoAgyStream, estimar, usoDaTentativa, usoAgyBrain } from './uso.mjs';
+import { modeloSemEsforco, usoClaudeJson, usoOpencode, usoAgyStream, estimar, usoDaTentativa, usoAgyBrain, consolidarListaModelos } from './uso.mjs';
+import {
+  validarAgendamentoInput,
+  aplicarAgendamentoNoProjeto,
+  podeAgendar,
+  avaliarAgendamentoProjeto,
+  diagnosticarAgendamentoNaHora,
+  marcarExecucaoAgendadaFalhou,
+  marcarPlanejamentoAgendadoDisparado,
+  marcarExecucaoAgendadaDisparada,
+  resumoAgendamento,
+} from './agendamento.mjs';
+import {
+  estimarDemandaPlano,
+  recomendarAjusteModelos,
+  aplicarPoliticaCotaAoProjeto,
+} from './demanda-ajuste.mjs';
+import {
+  CATEGORIAS_DEMANDA,
+  categoriaDemanda,
+  cacheHistorico,
+  montarHistoricoTarefas,
+  linhaEstimativa,
+} from './historico-estimativa.mjs';
 import { carregarPrecos, custoUsd, assinaturaDe, emBrl, idadeDias, atualizarPrecos, atualizarSeVencido } from './precos.mjs';
+import { lerUsoFora, usoForaVencido, usoForaNoPeriodo } from './uso-fora.mjs';
 import {
   temRodadaExecutada,
   limparLogsRaiz,
@@ -92,41 +116,63 @@ const CUSTOM_FILE = path.join(DATA, 'personalizado.json');
 const PERFIS_FILE = path.join(DATA, 'perfis.json');
 
 // ---------- modos ----------
-const GH = 'agy:gemini-3.8-flash-high', GM = 'agy:gemini-3.8-flash-medium', GL = 'agy:gemini-3.8-flash-low', ARGON = 'agy:gemini-4-argon-high';
-const [D1, D2, D3, D4] = DESESPERO; // glm-5.3-flash, big-pickle, minimax-m3.1-flash, iceman (ordem do teste de 12/11)
+// Modelos do Antigravity (o sufixo de esforço é trocado pela velocidade do projeto).
+const H = 'agy:gemini-4-hydrogen-medium', N = 'agy:gemini-4-neon-medium', NH = 'agy:gemini-4-neon-high';
+const F = 'agy:gemini-3.8-flash-medium', FL = 'agy:gemini-3.8-flash-low', ARGON = 'agy:gemini-4-argon-high';
+const [D1, D2, D3, D4] = DESESPERO; // glm-5.3-flash, big-pickle, minimax-m3.1-flash, iceman (NVIDIA só depois deles)
+const OPUS = 'claude:opus@medium', SONNET = 'claude:sonnet@medium', HAIKU = 'claude:haiku';
+// Cadeias montadas com o benchmark de 19/11/2026 (mesmo plano, 5 tarefas ao mesmo tempo, esforço low, nota do Haiku):
+//   Hydrogen 2 min 47 s nota 6 US$ 0,47 | Opus 3 min 38 s nota 7 US$ 2,37 | Sonnet 3 min 41 s nota 6 US$ 1,00
+//   3.8 Flash 5 min 36 s nota 6 US$ 0,48 | Neon 5 min 43 s nota 7 | Argon 6 min 07 s nota 7 US$ 0,93
+//   Haiku 6 min 20 s nota 7 (43 testes) US$ 0,27 | Hydrogen medium 9 min 16 s nota 7 | big-pickle 10 min nota 4 | NVIDIA ~10 h 45.
+// Rápido põe na frente o mais rápido com nota aceitável (Hydrogen, Opus, Sonnet); demorado, o de melhor resultado
+// mesmo que mais lento (Opus, Neon, Haiku); médio e automático ficam no meio. A reserva do Claude é o Gemini
+// (Hydrogen, Neon, 3.8 Flash). O Argon tem cota própria e menor: fica no planejador. A NVIDIA grátis só no desespero.
 export const MODES = {
   agressivo: {
-    nome: 'Agressivo', descricao: 'Só Claude, esforço alto: Opus planeja e corrige, Sonnet executa, Haiku no mecânico. Mais rápido e mais caro.',
-    planner: ['claude:opus@xhigh', ARGON, D1],
+    nome: 'Agressivo', descricao: 'Claude na frente: Opus planeja, corrige e faz o pesado, Sonnet e Opus executam, Haiku no mecânico; Gemini só de reserva. Mais rápido e mais caro.',
+    planner: ['claude:opus@xhigh', NH, ARGON],
     tiers: {
-      pesado: ['claude:opus@high', 'claude:sonnet@high'],
-      volume: ['claude:sonnet@high', 'claude:opus@medium', 'claude:haiku'],
-      leve: ['claude:haiku', 'claude:sonnet@medium'],
+      pesado: ['claude:opus@high', 'claude:sonnet@high', NH],
+      volume: [SONNET, OPUS, HAIKU, H],
+      leve: [HAIKU, SONNET, H],
     },
-    fix: ['claude:opus@high', 'claude:sonnet@high'], coord: ['claude:opus@high', 'claude:sonnet@high'], maxConcurrent: 3,
+    porVelocidade: {
+      rapido: { pesado: [OPUS, SONNET, H], volume: [OPUS, SONNET, H], leve: [SONNET, HAIKU, H] },
+      demorado: { pesado: [OPUS, SONNET, N], volume: [OPUS, SONNET, N], leve: [HAIKU, SONNET, N] },
+    },
+    fix: ['claude:opus@high', 'claude:sonnet@high', NH], coord: ['claude:opus@high', 'claude:sonnet@high', NH], maxConcurrent: 3,
   },
   equilibrado: {
-    nome: 'Equilibrado', descricao: 'Opus planeja; Sonnet no que pede cuidado, volume dividido entre Sonnet e Gemini; Haiku, Gemini low e o melhor gratuito no mecânico.',
-    planner: ['claude:opus@high', ARGON, D1],
+    nome: 'Equilibrado', descricao: 'Opus planeja; Sonnet no que pede cuidado; o volume alterna entre Haiku e Gemini Hydrogen, que juntos gastam pouco e repartem a cota; Neon no lugar do Sonnet quando ele falta.',
+    planner: ['claude:opus@high', ARGON, NH],
     tiers: {
-      pesado: ['claude:sonnet@high', GH, 'claude:haiku'],
-      volume: [['claude:sonnet@medium', GH, 'claude:haiku'], [GH, 'claude:sonnet@medium', 'claude:haiku']],
-      leve: ['claude:haiku', GL, D1],
+      pesado: ['claude:sonnet@high', NH, 'claude:opus@high'],
+      volume: [[HAIKU, H, SONNET], [H, HAIKU, N]],
+      leve: [HAIKU, FL, H],
     },
-    fix: ['claude:sonnet@high', GH], coord: ['claude:sonnet@medium', GH], maxConcurrent: 2,
+    porVelocidade: {
+      rapido: { pesado: [SONNET, H, OPUS], volume: [[H, SONNET, HAIKU], [SONNET, H, HAIKU]], leve: [H, HAIKU, F] },
+      demorado: { pesado: [OPUS, N, SONNET], volume: [[HAIKU, N, SONNET], [N, HAIKU, SONNET]], leve: [HAIKU, N, F] },
+    },
+    fix: ['claude:sonnet@high', NH], coord: [SONNET, N], maxConcurrent: 3,
   },
   padrao: {
-    nome: 'Padrão (econômico)', descricao: 'Opus planeja; Gemini 3.8 Flash executa; tarefa simples vai primeiro para o melhor modelo gratuito; Sonnet e Haiku só na falta de cota.',
-    planner: ['claude:opus@high', ARGON, D1],
+    nome: 'Padrão (econômico)', descricao: 'Opus planeja (Argon na falta); Gemini executa: Hydrogen e 3.8 Flash no volume, Neon no pesado; Haiku e Sonnet só quando a cota do Gemini acaba.',
+    planner: ['claude:opus@high', ARGON, NH],
     tiers: {
-      pesado: [GH, 'claude:sonnet', 'claude:haiku'],
-      volume: [GH, 'claude:sonnet', 'claude:haiku'],
-      leve: [D1, GL, GM, 'claude:haiku'],
+      pesado: [N, H, SONNET],
+      volume: [H, F, HAIKU],
+      leve: [F, H, HAIKU],
     },
-    fix: ['claude:sonnet', GH], coord: [GH, 'claude:sonnet'], maxConcurrent: 2,
+    porVelocidade: {
+      rapido: { pesado: [H, N, SONNET], volume: [H, F, HAIKU], leve: [H, F, HAIKU] },
+      demorado: { pesado: [N, SONNET, H], volume: [N, H, HAIKU], leve: [H, F, HAIKU] },
+    },
+    fix: [SONNET, N], coord: [N, SONNET], maxConcurrent: 3,
   },
   desespero: {
-    nome: 'Desespero (gratuitos)', descricao: 'Para quando a cota do Gemini acabou e a do Claude está no fim: tudo vai para os modelos gratuitos do opencode, do melhor para o pior. O pipeline também entra nele sozinho quando nenhum provedor tem cota.',
+    nome: 'Desespero (gratuitos)', descricao: 'Para quando a cota do Gemini acabou e a do Claude está no fim: tudo vai para os modelos gratuitos do opencode, do melhor para o pior. Eles são lentos (minutos por resposta; a NVIDIA levou horas no teste). O pipeline também entra nele sozinho quando nenhum provedor tem cota.',
     planner: [D1, 'agy:gpt-oss-120b-medium', 'claude:sonnet@medium'],
     tiers: {
       pesado: [D1, D2, D3],
@@ -136,6 +182,8 @@ export const MODES = {
     fix: [D1, D2], coord: [D1, D2], maxConcurrent: 2,
   },
 };
+// Cadeias do modo na velocidade do projeto (só os modos prontos têm uma ordem por velocidade).
+const tiersDe = (m, vel) => (m?.porVelocidade?.[vel] ? { ...m.tiers, ...m.porVelocidade[vel] } : m?.tiers);
 const temModo = (k) => typeof k === 'string' && Object.hasOwn(MODES, k);
 const LISTAS_TOPO = ['planner', 'fix', 'coord'];
 const TIPOS = ['escritor', 'integrador', 'tarefa'];
@@ -149,10 +197,10 @@ const SUPERVISAO = {
 const temSup = (k) => typeof k === 'string' && Object.hasOwn(SUPERVISAO, k);
 
 const VELOCIDADE = {
-  auto: 'Automático: esforço sugerido pelo planejador por tarefa; integração e verificação em médio (ou alto no modo agressivo).',
-  rapido: 'Rápido: executores em esforço baixo (low); integração e verificação em médio (medium).',
-  medio: 'Médio: executores, integração e verificação em esforço médio (medium).',
-  demorado: 'Demorado: executores, integração e verificação em esforço alto (high).',
+  auto: 'Automático: esforço sugerido pelo planejador por tarefa; integração e verificação em médio (ou alto no modo agressivo). Modelos na ordem padrão do modo.',
+  rapido: 'Rápido: na frente os modelos mais rápidos com nota aceitável no benchmark (Gemini Hydrogen, Opus, Sonnet), executores em esforço baixo (low); integração e verificação em médio.',
+  medio: 'Médio: ordem padrão do modo, que mistura provedores para poupar tokens e cota; executores, integração e verificação em esforço médio (medium).',
+  demorado: 'Demorado: na frente os de melhor resultado no benchmark, mesmo mais lentos (Opus, Gemini Neon, Haiku), em esforço alto (high).',
 };
 
 const temVel = (k) => typeof k === 'string' && Object.hasOwn(VELOCIDADE, k);
@@ -171,7 +219,7 @@ function validarCustom(c) {
     if (LISTAS_TOPO.includes(k)) out[k] = [...new Set(lista)]; else out.tiers[k] = [...new Set(lista)];
   }
   const mc = Number(c.maxConcurrent);
-  out.maxConcurrent = Number.isInteger(mc) && mc >= 1 && mc <= 6 ? mc : 2;
+  out.maxConcurrent = Number.isInteger(mc) && mc >= 1 && mc <= 8 ? mc : 2;
   // semGratuitos: nenhuma cadeia ganha os modelos gratuitos do opencode, nem o modo desespero automático.
   if (c.semGratuitos === true) out.semGratuitos = true;
   return { errs, custom: out };
@@ -208,6 +256,10 @@ function listAll() {
   return fs.readdirSync(PROJ).filter(idOk).map(load).filter(Boolean)
     .sort((a, b) => (b.criado || '').localeCompare(a.criado || ''));
 }
+export const historicoReal = cacheHistorico(
+  () => montarHistoricoTarefas(listAll(), { dataDir: DATA, projDirDe: (p) => pdir(p.id) }),
+  60000,
+);
 function slug(s) {
   return s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'projeto';
 }
@@ -255,16 +307,41 @@ function chainFor(p, t, idx = 0) {
   let c;
   if (Array.isArray(t?.cadeia) && t.cadeia.length) c = t.cadeia;
   else {
-    const tier = m?.tiers?.[t?.nivel] || m?.tiers?.volume || [];
+    const tiers = tiersDe(m, velDe(p)) || {};
+    const tier = tiers[t?.nivel] || tiers.volume || [];
     c = Array.isArray(tier[0]) ? tier[idx % tier.length] : tier;
     const esf = esforcoDaTarefa(p, t);
     if (esf) c = comEsforco(c, esf);
   }
-  const adaptada = m?.semGratuitos ? adaptar(c) : comReserva(adaptar(c));
+  const adaptada = pagoNaFrente(p, t, gratuitosNoFim(p, t, m?.semGratuitos ? adaptar(c) : comReserva(adaptar(c), esforcoDaTarefa(p, t), { semGemini: p?.modo === 'desespero' })));
   return adaptada.length ? adaptada : c;
 }
-function comReserva(c) {
-  const extra = adaptar(DESESPERO.slice(0, 2), []).filter((e) => !c.includes(e));
+// Teste de 19/11/2026: a NVIDIA grátis derruba sessões de 10 a 45 min; a recuperação levou 3 h e a integração 50 min.
+// Fora do desespero, integração, tarefa pesada e coordenação de falhas não começam num gratuito: se a cadeia só
+// tem gratuitos na frente, entra antes o primeiro modelo pago do planejador do modo (o usuário já o escolheu).
+function pagoNaFrente(p, t, c, { forcar = false } = {}) {
+  if (p?.modo === 'desespero' || !Array.isArray(c) || !c.length || !ehGratuito(c[0])) return c;
+  if (!forcar && t?.tipo !== 'integrador' && t?.nivel !== 'pesado') return c;
+  const pago = adaptar(cfgDe(p)?.planner || []).find((e) => /^(agy|claude):/.test(String(e)));
+  return pago && !c.includes(pago) ? [pago, ...c] : c;
+}
+// Gratuitos (opencode/* e nvidia/*) são lentos (≈44 tokens/s; na NVIDIA cada resposta leva minutos):
+// só vão na frente em tarefa leve. Nas pesadas e de volume ficam depois dos pagos, na ordem em que
+// estavam. Modo desespero ou cadeia só de gratuitos: nada muda.
+const ehGratuito = (e) => /^opencode:(opencode|nvidia)\//.test(String(e));
+function gratuitosNoFim(p, t, c) {
+  if (p?.modo === 'desespero' || t?.nivel === 'leve') return c;
+  return [...c.filter((e) => !ehGratuito(e)), ...c.filter(ehGratuito)];
+}
+// Reserva no fim da cadeia: primeiro o Gemini (Hydrogen e 3.8 Flash), que é a reserva natural do Claude, e por
+// último um gratuito que não seja da NVIDIA (19/11/2026: a NVIDIA grátis levou ~10 h 45 num plano de minutos).
+const RESERVA_GEMINI = [H, F];
+const familia = (e) => String(e).replace(/@.*$/, '').replace(/-(low|medium|high|xhigh)$/, '');
+function comReserva(c, esf = null, { semGemini = false } = {}) {
+  const tem = new Set(c.map(familia));
+  const gem = semGemini ? [] : RESERVA_GEMINI.map((e) => (esf ? comEsforco(e, esf) : e));
+  const gratis = DESESPERO.filter((e) => !String(e).startsWith("opencode:nvidia/")).slice(0, 1);
+  const extra = adaptar([...gem, ...gratis], []).filter((e) => !tem.has(familia(e)));
   return [...c, ...extra].slice(0, Math.max(8, c.length));
 }
 const wtName = (p, t) => `${p.id.slice(-6)}-${t.id}`.replace(/[^a-z0-9_-]/gi, '-');
@@ -330,13 +407,26 @@ async function runClaude({ cwd, model, effort, prompt, resume, bare, entry }) {
   }
 }
 
+// Opencode enxuto, como no worker.ps1 (18/11/2026): sem os servidores MCP do opencode.jsonc e sem as
+// skills e o CLAUDE.md do Claude Code. Medido: 149 mil tokens de entrada por requisição caem para 12 mil.
+function envOpencodeEnxuto(base = process.env) {
+  const mcp = {};
+  for (const f of ['opencode.jsonc', 'opencode.json', 'config.json']) {
+    try {
+      const txt = fs.readFileSync(path.join(HOME, '.config', 'opencode', f), 'utf8').replace(/^\s*\/\/.*$/gm, '');
+      for (const n of Object.keys(JSON.parse(txt).mcp || {})) mcp[n] = { enabled: false };
+    } catch {}
+  }
+  return { ...base, OPENCODE_DISABLE_CLAUDE_CODE: '1', OPENCODE_DISABLE_EXTERNAL_SKILLS: '1', OPENCODE_CONFIG_CONTENT: JSON.stringify({ mcp }) };
+}
+
 // opencode com o agente "plan" (não edita). O planner.md vai no começo do primeiro prompt.
 async function runOpencode({ cwd, model, effort, prompt, resume, bare, entry }) {
   const args = ['/d', '/c', 'opencode', 'run', '--pure', '--agent', 'plan', '--model', model, '--format', 'json', '--title', 'Delegar planejamento'];
   if (effort) args.push('--variant', effort);
   if (resume) args.push('--session', resume);
   const parts = []; let session = null; const erros = []; const evs = [];
-  const r = await coletar(spawn('cmd.exe', args, { cwd, windowsHide: true }), resume || bare ? prompt : instrucoes() + '\n\n---\n\n' + prompt, LIMITE_PLANEJADOR, (l) => {
+  const r = await coletar(spawn('cmd.exe', args, { cwd, windowsHide: true, env: envOpencodeEnxuto() }), resume || bare ? prompt : instrucoes() + '\n\n---\n\n' + prompt, LIMITE_PLANEJADOR, (l) => {
     try {
       const e = JSON.parse(l); session = e.sessionID || session;
       evs.push(e);
@@ -398,6 +488,8 @@ function transcricao(p, novo) {
   return `${introducao(p)}\n\n## Conversa até agora\n${hist || '(nenhuma)'}\n\n## Nova mensagem do usuário\n${novo}`;
 }
 
+// Falhas do provedor que não dizem nada do pedido: vale tentar o próximo modelo da lista.
+const FALHA_PASSAGEIRA_RE = /(ProviderHeaderTimeoutError|ProviderResponseStreamError|headers timed out|timed out after|ETIMEDOUT|ECONNRESET|ECONNREFUSED|socket hang up|\b50[234]\b|overloaded|service unavailable)/i;
 async function chamarPlanejador(p, texto) {
   const cands = adaptar(cfgDe(p).planner);
   const avisos = [];
@@ -419,12 +511,18 @@ async function chamarPlanejador(p, texto) {
     }
     if (!p.uso || typeof p.uso !== 'object') p.uso = { chamadas: [] };
     if (!Array.isArray(p.uso.chamadas)) p.uso.chamadas = [];
-    p.uso.chamadas.push({ quando: horaLocal(), papel: 'planejador', ...(r.uso || null) });
+    // sessao: o uso-fora.mjs tira esta sessão da conta de fora do orquestrador (ela já conta aqui).
+    p.uso.chamadas.push({ quando: horaLocal(), papel: 'planejador', sessao: r.session || null, ...(r.uso || null) });
     save(p);
     ultimo = { ...r, entry, avisos };
-    if (r.ok || !QUOTA_RE.test(r.text)) return ultimo;
-    avisos.push(`Planejador ${entry} sem cota; tentando o próximo modelo.`);
-    evento(p, { tipo: 'troca', modelo: entry, texto: 'planejador sem cota, tentando o próximo' });
+    if (r.ok) return ultimo;
+    // Troca de modelo por cota e também por falha passageira do provedor (caso real 18/11: a NVIDIA não
+    // mandou os cabeçalhos em 30 s e o planejamento parou sem tentar o segundo modelo da lista).
+    const semCota = QUOTA_RE.test(r.text);
+    if (!semCota && !FALHA_PASSAGEIRA_RE.test(r.text)) return ultimo;
+    const porque = semCota ? 'sem cota' : 'com falha do provedor';
+    avisos.push(`Planejador ${entry} ${porque}; tentando o próximo modelo.`);
+    evento(p, { tipo: 'troca', modelo: entry, texto: `planejador ${porque}, tentando o próximo` });
   }
   return ultimo;
 }
@@ -501,7 +599,7 @@ async function corrigirJson(p, bruto, erro) {
       const r = await run({ cwd: p.repo, model, effort, prompt, bare: true, entry });
       if (!p.uso || typeof p.uso !== 'object') p.uso = { chamadas: [] };
       if (!Array.isArray(p.uso.chamadas)) p.uso.chamadas = [];
-      p.uso.chamadas.push({ quando: horaLocal(), papel: 'corretor', ...(r.uso || null) });
+      p.uso.chamadas.push({ quando: horaLocal(), papel: 'corretor', sessao: r.session || null, ...(r.uso || null) });
       save(p);
       if (!r.ok) continue;
       const x = extractPlan(r.text);
@@ -516,7 +614,7 @@ async function corrigirJson(p, bruto, erro) {
   return null;
 }
 
-function validatePlan(pl, isGit) {
+export function validatePlan(pl, isGit) {
   const errs = [];
   if (!pl || typeof pl !== 'object') return ['plano vazio'];
   if (!Array.isArray(pl.tarefas) || !pl.tarefas.length) errs.push('sem tarefas');
@@ -524,10 +622,10 @@ function validatePlan(pl, isGit) {
   if (Array.isArray(pl.tarefas)) {
     const qtdEscritores = pl.tarefas.filter((t) => t && t.tipo === 'escritor').length;
     if (pl.maxConcurrent == null) {
-      if (qtdEscritores > 0) pl.maxConcurrent = Math.min(6, Math.max(2, qtdEscritores));
+      if (qtdEscritores > 0) pl.maxConcurrent = Math.min(8, Math.max(2, qtdEscritores));
     } else {
       const mc = Number(pl.maxConcurrent);
-      if (!Number.isInteger(mc) || mc < 1 || mc > 6) errs.push('maxConcurrent deve ser inteiro de 1 a 6');
+      if (!Number.isInteger(mc) || mc < 1 || mc > 8) errs.push("maxConcurrent deve ser inteiro de 1 a 8");
       else pl.maxConcurrent = mc;
     }
   }
@@ -538,6 +636,7 @@ function validatePlan(pl, isGit) {
     ids.add(t.id);
     if (!TIPOS.includes(t.tipo)) errs.push(`${t.id}: tipo inválido`);
     if (!NIVEIS.includes(t.nivel)) errs.push(`${t.id}: nível inválido`);
+    if (t.demanda != null && !CATEGORIAS_DEMANDA.includes(t.demanda)) errs.push(`${t.id}: demanda inválida: ${t.demanda}`);
     if (t.esforco != null && !['low', 'medium', 'high'].includes(t.esforco)) errs.push(`${t.id}: esforço inválido`);
     if (typeof t.prompt !== 'string' || t.prompt.length < 20) errs.push(`${t.id}: prompt vazio`);
     else if (t.prompt.length > 25000) errs.push(`${t.id}: prompt longo demais`);
@@ -600,9 +699,20 @@ async function plannerTurn(p, userText, { gerar = false } = {}) {
     if (temRodadaExecutada(p, pdir(p.id))) arquivarRodadaSePreciso(p);
     p.plano = plan; p.estado = 'plano_pronto'; p._corrigido = false;
     if (plan.titulo && !p.tituloFixo) p.titulo = String(plan.titulo).slice(0, 120);
-    p.mensagens.push({ papel: 'sistema', texto: `Plano recebido: ${plan.tarefas.length} tarefas.`, quando: now() });
+    const dem = calcularDemandaSegura(p);
+    p.demanda = dem;
+    const baseTexto = `Plano recebido: ${plan.tarefas.length} tarefas.`;
+    const textoMsg = dem?.linhaResumo ? `${baseTexto}\n${dem.linhaResumo}` : baseTexto;
+    p.mensagens.push({ papel: 'sistema', texto: textoMsg, quando: now() });
     save(p);
     report(p);
+    if (p.agendamento?.executarEm && Number(p.agendamento.executarEm) > Date.now() && !p.agendamento?.execucaoDisparadaEm) {
+      const resumo = resumoAgendamento(p);
+      p.mensagens.push({ papel: 'sistema', texto: `Plano pronto. Aguardando horário agendado (${resumo?.texto || 'execução futura'}).`, quando: now() });
+      save(p);
+      report(p);
+      return p;
+    }
     if (p.auto) return startPipeline(p);
     return p;
   }
@@ -614,7 +724,7 @@ async function plannerTurn(p, userText, { gerar = false } = {}) {
 // Quantas tarefas ao mesmo tempo. No automático (confiar no orquestrador ou acompanhamento automático) vale o
 // número que o planejador pediu, até LIMITE_PARALELO, porque lotes independentes terminam mais cedo; no manual
 // fica o limite do modo escolhido. Em todos os casos o pipeline ainda corta pela cota (quota.ps1).
-const LIMITE_PARALELO = 6;
+const LIMITE_PARALELO = 8;
 function paralelismo(p, m) {
   const pedido = Number(p.plano?.maxConcurrent);
   const modo = Number(m.maxConcurrent) || 2;
@@ -677,7 +787,8 @@ function buildPlanFile(p) {
     o.prompt = f;
     return o;
   });
-  const vol0 = Array.isArray(m.tiers.volume[0]) ? m.tiers.volume[0] : m.tiers.volume;
+  const volT = tiersDe(m, velDe(p)).volume;
+  const vol0 = Array.isArray(volT[0]) ? volT[0] : volT;
   const esfIv = esforcoIntegracaoVerificacao(p);
 
   const tarefasComCadeia = (p.plano?.tarefas || []).filter((t) => Array.isArray(t.cadeia) && t.cadeia.length);
@@ -699,9 +810,9 @@ function buildPlanFile(p) {
   const fixJunto = [...new Set([...modelosEditadosAjustados, ...fixBase])];
   const coordJunto = [...new Set([...modelosEditadosAjustados, ...coordBase])];
 
-  const reservaG = (c) => (m?.semGratuitos ? c : comReserva(c));
+  const reservaG = (c) => (m?.semGratuitos ? c : comReserva(c, null, { semGemini: p?.modo === 'desespero' }));
   const fixEfetiva = semGratuitosReserva(reservaG(adaptar(fixJunto)), p, modelosEditados);
-  const coordEfetiva = semGratuitosReserva(reservaG(adaptar(coordJunto)), p, modelosEditados);
+  const coordEfetiva = pagoNaFrente(p, null, semGratuitosReserva(reservaG(adaptar(coordJunto)), p, modelosEditados), { forcar: true });
 
   const vel = velDe(p);
   const esfExec = vel === 'rapido' ? 'low' : (vel === 'medio' ? 'medium' : (vel === 'demorado' ? 'high' : null));
@@ -733,9 +844,206 @@ function gravarSupervisao(p) {
   try { const j = JSON.parse(fs.readFileSync(pf, 'utf8')); j.supervision = supDe(p); fs.writeFileSync(pf, JSON.stringify(j, null, 2)); } catch {}
 }
 
+export function calcularDemandaEAjuste(p, { forcarEstrategia = null, comSugestao = false } = {}) {
+  if (!p?.plano) return null;
+  try {
+    const tabela = carregarPrecos({ dataDir: DATA });
+    const hist = historicoReal();
+    const c = lerCache() || {};
+    const cotasCache = { dados: c };
+    const linhas = linhasDeCotas(c, detectar());
+    const historicoCotas = lerHistoricoCotas(DATA);
+    const projetos = listAll();
+    const tentativas = coletarTentativasUso(projetos, { dataDir: DATA, dadosUsoProjeto: (proj) => dadosUsoDoProjeto(proj, tabela) });
+    const estimativas = estimarTokensPorCota(historicoCotas, tentativas);
+    const par = paralelismo(p, cfgDe(p));
+    const chainForFn = (proj, t, idx) => chainFor(proj, t, idx);
+    const demanda = estimarDemandaPlano(p, {
+      historico: hist,
+      dadosCotas: cotasCache?.dados,
+      esforcoFn: esforcoDaTarefa,
+      paralelismo: par,
+      chainForFn,
+      tabelaPrecos: tabela,
+      estimativasCota: estimativas,
+      linhasCotas: linhas,
+    });
+    const recomendacao = recomendarAjusteModelos(p, {
+      demanda,
+      linhasCotas: linhas,
+      provedores: detectar(),
+      historico: hist,
+      dadosCotas: cotasCache?.dados,
+      esforcoFn: esforcoDaTarefa,
+      paralelismo: par,
+      chainForFn,
+      tabelaPrecos: tabela,
+      estimativasCota: estimativas,
+      forcarEstrategia,
+    });
+    // A simulação da sugestão só interessa à prévia; não vai para o project.json.
+    const { demandaSugerida, ...recSemSim } = recomendacao || {};
+    return comSugestao ? { ...demanda, recomendacao: recSemSim, demandaSugerida } : { ...demanda, recomendacao: recSemSim };
+  } catch (err) {
+    console.error('calcularDemandaEAjuste erro:', err);
+    return null;
+  }
+}
+
+// ---- Ajuste por cota: prévia, aplicação e desfazer (19/11/2026) ----
+// Antes, os botões só gravavam p.politicaCota: o plano ajustado que aplicarPoliticaCotaAoProjeto devolvia era
+// descartado e nenhum modelo mudava. Agora a prévia mostra antes x depois sem gravar; aplicar troca as cadeias das
+// tarefas e guarda as originais em p.ajusteCota.anterior; "Ignorar / manter originais" volta a elas.
+const NOMES_POLITICA = { auto: 'ajuste recomendado', economizar: 'economizar ao máximo', usar_melhor: 'melhores modelos', ignorar: 'manter originais', personalizado: 'personalizado' };
+const POLITICA_PARA_ESTRATEGIA = { auto: null, economizar: 'economizar_maximo', usar_melhor: 'usar_melhor' };
+function resumoDemanda(d) {
+  if (!d) return null;
+  return {
+    tempoSeg: d.tempo?.totalSeg ?? null, faixaTempoSeg: d.tempo?.faixaSeg || null,
+    entrada: d.total?.entrada ?? null, cacheLido: d.total?.cacheLido ?? 0, saida: d.total?.saida ?? null, usd: d.total?.usd ?? null,
+    porGrupo: Object.fromEntries(Object.entries(d.porGrupo || {}).filter(([, v]) => v?.tarefas).map(([g, v]) => [g, { pct5h: v.pct5hEstimado ?? null, pctSemanal: v.pctSemanalEstimado ?? null }])),
+    tarefas: (d.tarefas || []).map((x) => ({ id: x.id, modelo: x.modeloAssumido || x.modeloPrincipal || null, esforco: x.esforcoEfetivo || x.esforco || null, duracaoSeg: x.duracaoSegEstimada ?? null, usd: x.custoUsdEstimado ?? null })),
+  };
+}
+function tarefasComAjusteAnterior(p) {
+  const ant = new Map((p.ajusteCota?.anterior || []).map((a) => [a.id, a]));
+  return (p.plano?.tarefas || []).map((t) => {
+    const a = ant.get(t.id);
+    if (!a) return t;
+    const n = { ...t };
+    if (a.cadeia) n.cadeia = [...a.cadeia]; else delete n.cadeia;
+    if (a.esforco) n.esforco = a.esforco; else delete n.esforco;
+    delete n.cadeiaEfetiva;
+    return n;
+  });
+}
+// Escolhas da prévia personalizada: { idTarefa: 'provedor:modelo' }. null quando não veio nada; false se inválido.
+function escolhasPersonalizadas(c) {
+  if (c == null) return null;
+  if (typeof c !== 'object' || Array.isArray(c)) return false;
+  const out = {};
+  for (const [k, v] of Object.entries(c)) {
+    if (typeof k !== 'string' || k.length > 40 || typeof v !== 'string' || !entradaValida(v)) return false;
+    out[k] = v;
+  }
+  return out;
+}
+export function previaAjusteCota(p, politica, { cadeias = null } = {}) {
+  if (!p?.plano) return null;
+  const atual = calcularDemandaEAjuste(p, { comSugestao: false });
+  let depoisProj; let rec = null; let cadPers = {};
+  if (politica === 'personalizado') {
+    // Modelo escolhido pela pessoa em cada tarefa; o resto da cadeia atual fica como reserva.
+    let idxVol = 0;
+    for (const t of p.plano.tarefas) {
+      const idx = (t.nivel || 'volume') === 'volume' ? idxVol++ : 0;
+      const esc = cadeias && typeof cadeias[t.id] === 'string' ? cadeias[t.id] : null;
+      if (!esc || !entradaValida(esc)) continue;
+      const atualCad = chainFor(p, t, idx);
+      if (atualCad[0] === esc) continue;
+      cadPers[t.id] = [esc, ...atualCad.filter((e) => e !== esc)].slice(0, 8);
+    }
+    depoisProj = { ...p, plano: { ...p.plano, tarefas: p.plano.tarefas.map((t) => (cadPers[t.id] ? { ...t, cadeia: cadPers[t.id] } : t)) } };
+  } else if (politica === 'ignorar') {
+    depoisProj = p.ajusteCota ? { ...p, plano: { ...p.plano, tarefas: tarefasComAjusteAnterior(p) } } : p;
+  } else {
+    const calc = calcularDemandaEAjuste(p, { forcarEstrategia: POLITICA_PARA_ESTRATEGIA[politica] ?? null, comSugestao: true });
+    rec = calc?.recomendacao || null;
+    const cad = rec?.cadeiasSugeridas || {}; const esf = rec?.esforcosSugeridos || {};
+    depoisProj = { ...p, plano: { ...p.plano, tarefas: p.plano.tarefas.map((t) => ({ ...t, ...(cad[t.id] ? { cadeia: cad[t.id] } : {}), ...(esf[t.id] ? { esforco: esf[t.id] } : {}) })) } };
+  }
+  const depois = depoisProj === p ? atual : calcularDemandaEAjuste(depoisProj, { comSugestao: false });
+  const antesR = resumoDemanda(atual); const depoisR = resumoDemanda(depois);
+  const porId = (r) => new Map((r?.tarefas || []).map((x) => [x.id, x]));
+  const a = porId(antesR); const d = porId(depoisR);
+  const mudancas = []; const tarefas = [];
+  for (const t of p.plano.tarefas) {
+    const x = a.get(t.id) || {}; const y = d.get(t.id) || {};
+    const item = { id: t.id, titulo: t.titulo, de: x.modelo, para: y.modelo, esforcoDe: x.esforco, esforcoPara: y.esforco, duracaoDe: x.duracaoSeg, duracaoPara: y.duracaoSeg, escolhido: cadPers[t.id]?.[0] || null };
+    item.mudou = x.modelo !== y.modelo || x.esforco !== y.esforco || !!item.escolhido;
+    tarefas.push(item);
+    if (item.mudou) mudancas.push(item);
+  }
+  return {
+    politica, estrategia: rec?.estrategia || (politica === 'ignorar' ? 'originais' : (politica === 'personalizado' ? 'personalizado' : 'manter')),
+    motivo: politica === 'ignorar'
+      ? (p.ajusteCota ? `Volta aos modelos de antes do ajuste "${NOMES_POLITICA[p.ajusteCota.politica] || p.ajusteCota.politica}".` : 'Nenhum ajuste foi aplicado; o plano já está com os modelos originais.')
+      : (politica === 'personalizado' ? 'Escolha o modelo de cada tarefa na última coluna; a estimativa é refeita a cada troca.' : (rec?.motivo || '')),
+    mudancas, tarefas, antes: antesR, depois: depoisR, ajusteAplicado: p.ajusteCota ? { politica: p.ajusteCota.politica, quando: p.ajusteCota.quando } : null,
+    _cadeias: politica === 'personalizado' ? cadPers : (rec?.cadeiasSugeridas || {}), _esforcos: rec?.esforcosSugeridos || {},
+  };
+}
+export function aplicarAjusteCotaNoPlano(p, politica, opcoes = {}) {
+  if (!p?.plano) return { mudou: 0, texto: 'sem plano' };
+  if (politica === 'ignorar') {
+    p.politicaCota = 'ignorar';
+    if (!p.ajusteCota) return { mudou: 0, texto: 'nada a desfazer; o plano já está com os modelos originais' };
+    const n = (p.ajusteCota.anterior || []).length;
+    const de = p.ajusteCota.politica;
+    p.plano.tarefas = tarefasComAjusteAnterior(p);
+    delete p.ajusteCota;
+    p.demanda = calcularDemandaSegura(p);
+    return { mudou: n, texto: `ajuste "${de}" desfeito; ${n} tarefa(s) voltaram aos modelos originais` };
+  }
+  const pv = previaAjusteCota(p, politica, opcoes);
+  p.politicaCota = politica === 'personalizado' ? 'ignorar' : politica;
+  const ids = new Set([...Object.keys(pv?._cadeias || {}), ...Object.keys(pv?._esforcos || {})]);
+  if (!ids.size) return { mudou: 0, texto: pv?.motivo ? `nada muda (${pv.motivo})` : 'nada muda' };
+  // Guarda as cadeias de antes do PRIMEIRO ajuste, para "manter originais" voltar ao plano do planejador.
+  const anterior = p.ajusteCota?.anterior ? [...p.ajusteCota.anterior] : [];
+  const jaSalvas = new Set(anterior.map((a) => a.id));
+  for (const t of p.plano.tarefas) {
+    if (!ids.has(t.id)) continue;
+    if (!jaSalvas.has(t.id)) anterior.push({ id: t.id, cadeia: Array.isArray(t.cadeia) ? [...t.cadeia] : null, esforco: t.esforco || null });
+    if (pv._cadeias[t.id]) t.cadeia = [...pv._cadeias[t.id]];
+    if (pv._esforcos[t.id]) t.esforco = pv._esforcos[t.id];
+    delete t.cadeiaEfetiva;
+  }
+  p.ajusteCota = { politica, quando: now(), anterior, mudancas: pv.mudancas };
+  p.demanda = calcularDemandaSegura(p);
+  return { mudou: ids.size, texto: `${ids.size} tarefa(s) com modelo ou esforço trocado. ${pv.motivo || ''}`.trim() };
+}
+
+export function calcularDemandaSegura(p) {
+  if (!p?.plano) return null;
+  try {
+    const t0 = Date.now();
+    const d = calcularDemandaEAjuste(p);
+    if (Date.now() - t0 > 1000) return null;
+    return d;
+  } catch {
+    return null;
+  }
+}
+
+export function atualizarMensagemPlanoRecebido(p) {
+  if (!p?.plano) return;
+  const dem = calcularDemandaSegura(p);
+  p.demanda = dem;
+  const base = `Plano recebido: ${p.plano.tarefas.length} tarefas.`;
+  const novoTexto = dem?.linhaResumo ? `${base}\n${dem.linhaResumo}` : base;
+  if (Array.isArray(p.mensagens)) {
+    for (let i = p.mensagens.length - 1; i >= 0; i--) {
+      const m = p.mensagens[i];
+      if (m && m.papel === 'sistema' && typeof m.texto === 'string' && m.texto.startsWith('Plano recebido:')) {
+        m.texto = novoTexto;
+        break;
+      }
+    }
+  }
+}
+
 function startPipeline(p, resume = false) {
   if (!p.plano) return p;
+  // Execução iniciada à mão (aprovar, retomar, executar de novo) cumpre a execução agendada pendente:
+  // sem isso, o horário antigo dispara uma rodada nova depois (caso real 18/11, projeto Startup).
+  if (p.agendamento?.executarEm && !p.agendamento.execucaoDisparadaEm) marcarExecucaoAgendadaDisparada(p);
+  // Rodada nova ou retomada: a comparação estimado x real da rodada anterior deixa de valer (caso de
+  // 18/11: a de uma rodada cancelada ficou na tela durante as seguintes). No fim ela é montada de novo.
+  delete p.comparacaoEstimativa;
   if (!resume && temRodadaExecutada(p, pdir(p.id))) arquivarRodadaSePreciso(p, { manterPlano: true });
+  // O ajuste por cota é aplicado no plano quando o usuário escolhe (aplicarAjusteCotaNoPlano), com prévia e
+  // desfazer. Aqui não se troca modelo por conta própria: o bloco antigo dizia "aplicada" sem mudar nada.
   const pf = resume ? path.join(pdir(p.id), 'plan.json') : buildPlanFile(p);
   if (!resume) limparLogsRaiz(path.join(pdir(p.id), 'logs'));
   else {
@@ -749,9 +1057,40 @@ function startPipeline(p, resume = false) {
     save(p); return p;
   }
   p.estado = 'executando';
-  if (!resume) p.inicio = now();
+  if (!resume) {
+    p.inicio = now();
+    const demAtual = calcularDemandaEAjuste(p) || p.demanda;
+    if (demAtual && Array.isArray(demAtual.tarefas)) {
+      const tarefasObj = {};
+      for (const t of demAtual.tarefas) {
+        if (!t || t.id == null) continue;
+        tarefasObj[t.id] = {
+          entrada: t.entradaEstimada ?? t.entrada ?? 0,
+          saida: t.saidaEstimada ?? t.saida ?? 0,
+          cacheLido: t.cacheLidoEstimado ?? t.cacheLido ?? 0,
+          cacheGravado: t.cacheGravadoEstimado ?? t.cacheGravado ?? 0,
+          duracaoSeg: t.duracaoSegEstimada ?? t.duracaoSeg ?? 0,
+          modeloAssumido: t.modeloAssumido || null,
+          demanda: t.demanda || null,
+        };
+      }
+      p.estimativaInicial = {
+        quando: now(),
+        tarefas: tarefasObj,
+        total: demAtual.total || null,
+        tempo: demAtual.tempo || null,
+      };
+    }
+  }
   p.fim = null;
-  p.mensagens.push({ papel: 'sistema', texto: resume ? 'Execução retomada.' : `Execução iniciada (modo ${nomeModo(p)}, velocidade ${velDe(p)}, acompanhamento ${supDe(p)}, até ${paralelismo(p, cfgDe(p))} tarefas ao mesmo tempo, conforme a cota).`, quando: now() });
+  let msgExec = resume ? 'Execução retomada.' : `Execução iniciada (modo ${nomeModo(p)}, velocidade ${velDe(p)}, acompanhamento ${supDe(p)}, até ${paralelismo(p, cfgDe(p))} tarefas ao mesmo tempo, conforme a cota).`;
+  if (!resume && p.auto) {
+    const dem = p.demanda || calcularDemandaSegura(p);
+    if (dem?.linhaResumo) {
+      msgExec += `\n${dem.linhaResumo}`;
+    }
+  }
+  p.mensagens.push({ papel: 'sistema', texto: msgExec, quando: now() });
   save(p);
   report(p);
   if (!resume) logDiario(p, 'Iniciado', [`**Iniciado:** execução do plano (${p.plano.tarefas.length} tarefas, modo ${nomeModo(p)}, velocidade ${velDe(p)}) em \`${p.repo}\`.`]);
@@ -821,6 +1160,8 @@ function eventos(p, n = 40) {
 // Última ação legível de um log de trabalhador (stream-json do Claude, json do opencode ou texto do agy).
 function ultimaAcao(texto) {
   const linhas = texto.split(/\r?\n/).filter((l) => l.trim());
+  let espera = '';
+  const com = (x) => (espera ? `${x} · ${espera}` : x);
   for (let i = linhas.length - 1; i >= 0 && i >= linhas.length - 200; i--) {
     const l = linhas[i].trim();
     if (l.startsWith('{')) {
@@ -829,34 +1170,59 @@ function ultimaAcao(texto) {
         const blocos = e.message?.content;
         if (e.type === 'assistant' && Array.isArray(blocos)) {
           const tu = [...blocos].reverse().find((b) => b.type === 'tool_use');
-          if (tu) return resumoFerramenta(tu.name, tu.input);
+          if (tu) return com(resumoFerramenta(tu.name, tu.input));
           const tx = [...blocos].reverse().find((b) => b.type === 'text' && b.text?.trim());
-          if (tx) return tx.text.trim().slice(0, 200);
+          if (tx) return com(tx.text.trim().slice(0, 200));
         }
-        if (e.type === 'tool_use' && e.part) return resumoFerramenta(e.part.tool, e.part.state?.input);
-        if (e.type === 'text' && e.part?.text) return e.part.text.trim().slice(0, 200);
+        if (e.type === 'tool_use' && e.part) return com(resumoFerramenta(e.part.tool, e.part.state?.input));
+        // opencode entre passos (o mais recente vence): guarda a espera e continua procurando a última ação,
+        // para mostrar as duas juntas ("bash: ... · esperando o modelo há 40 s").
+        if ((e.type === 'step_start' || e.type === 'step_finish') && Number.isFinite(e.timestamp)) {
+          if (!espera) {
+            const s = Math.max(0, Math.round((Date.now() - e.timestamp) / 1000));
+            espera = `esperando o modelo há ${s < 90 ? `${s} s` : `${Math.round(s / 60)} min`}`;
+          }
+          continue;
+        }
+        if (e.type === 'text' && e.part?.text) return com(e.part.text.trim().slice(0, 200));
         if (e.type === 'result' && e.result) return 'terminou: ' + String(e.result).trim().slice(0, 160);
       } catch {}
       continue;
     }
-    return l.slice(0, 200);
+    return com(l.slice(0, 200));
   }
-  return '';
+  return espera;
 }
 function resumoFerramenta(nome, inp = {}) {
   const alvo = inp?.file_path || inp?.filePath || inp?.path || inp?.command || inp?.pattern || inp?.url || inp?.description || '';
   return `${nome}${alvo ? ': ' + String(alvo).replace(/\s+/g, ' ').slice(0, 160) : ''}`;
 }
-function agoraNaTarefa(p, id) {
+export function agoraNaTarefa(p, id) {
   const ld = path.join(pdir(p.id), 'logs', id);
   if (!fs.existsSync(ld)) return null;
-  const outs = fs.readdirSync(ld).filter((f) => /^\d+-.*\.out\.log$/.test(f)).sort((a, b) => parseInt(a) - parseInt(b));
+  // O log da tentativa atual é o mais recente (não o de maior número: uma rodada nova ou retomada recomeça
+  // a numeração em 1 e os logs da rodada anterior continuam na pasta; caso de 18/11, painel mostrava a
+  // última ação de uma tentativa parada havia 30 min).
+  const outs = fs.readdirSync(ld).filter((f) => /^\d+-.*\.out\.log$/.test(f))
+    .map((f) => ({ f, t: fs.statSync(path.join(ld, f)).mtimeMs })).sort((a, b) => a.t - b.t).map((x) => x.f);
   if (!outs.length) return null;
-  const f = outs[outs.length - 1];
-  const st = fs.statSync(path.join(ld, f));
   const cur = lerJson(path.join(ld, 'current.json')) || {};
+  const doAtual = cur.attempt ? outs.filter((x) => parseInt(x) === Number(cur.attempt)) : [];
+  const f = doAtual.length ? doAtual[doAtual.length - 1] : outs[outs.length - 1];
+  const st = fs.statSync(path.join(ld, f));
   const fim = cur.worker ? null : lerJson(path.join(ld, 'result.json'));
-  return { tentativa: parseInt(f), modelo: cur.worker || fim?.model || null, verificando: !!fim, arquivo: f, acao: ultimaAcao(cauda(path.join(ld, f))), atualizado: st.mtime.toISOString() };
+  let acao = ultimaAcao(cauda(path.join(ld, f)));
+  let atualizado = st.mtime;
+  if (!acao) {
+    const errFile = path.join(ld, f.replace(/\.out\.log$/, '.err.log'));
+    // .err.log ausente, vazio ou ilegível não pode derrubar o painel: cauda() já devolve '' em falha de leitura.
+    const errAcao = ultimaAcao(cauda(errFile));
+    if (errAcao) {
+      acao = 'erro: ' + errAcao;
+      try { const errSt = fs.statSync(errFile); if (errSt.mtime > atualizado) atualizado = errSt.mtime; } catch {}
+    }
+  }
+  return { tentativa: parseInt(f), modelo: cur.worker || fim?.model || null, verificando: !!fim, arquivo: f, acao, atualizado: atualizado.toISOString() };
 }
 function commitsRecentes(repo) {
   return new Promise((resolve) => {
@@ -879,6 +1245,36 @@ async function atividade(p) {
 
 function poll() {
   for (const p of listAll()) {
+    const acaoAg = avaliarAgendamentoProjeto(p);
+    if (acaoAg.acao === 'planejar') {
+      marcarPlanejamentoAgendadoDisparado(p);
+      if (acaoAg.autoExecutarDepois) p.auto = true;
+      p.mensagens.push({ papel: 'sistema', texto: 'Horário agendado atingido: iniciando planejamento.', quando: now() });
+      save(p);
+      plannerTurn(p, p.pedido).catch((e) => console.error(e));
+      continue;
+    }
+    if (acaoAg.acao === 'executar') {
+      marcarExecucaoAgendadaDisparada(p);
+      const msgTexto = acaoAg.reexecutar
+        ? 'Horário agendado atingido: executando o plano de novo (rodada nova).'
+        : 'Horário agendado atingido: iniciando execução.';
+      p.mensagens.push({ papel: 'sistema', texto: msgTexto, quando: now() });
+      evento(p, { tipo: 'agendamento', texto: msgTexto });
+      save(p);
+      startPipeline(p);
+      continue;
+    }
+    const diagAg = diagnosticarAgendamentoNaHora(p);
+    if (diagAg) {
+      marcarExecucaoAgendadaFalhou(p, diagAg.motivo);
+      const pendenciaTexto = diagAg.tipoPendencia === 'planejar' ? 'o planejamento' : 'a execução';
+      const textoFalha = `Horário agendado atingido, mas ${pendenciaTexto} não pôde começar: ${diagAg.motivo}`;
+      p.mensagens.push({ papel: 'sistema', texto: textoFalha, quando: now() });
+      evento(p, { tipo: 'agendamento', texto: textoFalha });
+      save(p);
+      report(p);
+    }
     if (p.estado !== 'executando') continue;
     const r = readRun(p);
     const h = crypto.createHash('md5').update(JSON.stringify(r.status)).digest('hex');
@@ -887,6 +1283,7 @@ function poll() {
     if (ended) {
       p.estado = /RESULTADO: CONCLUIDO/.test(r.summary) ? 'concluido' : 'incompleto';
       p.fim = now();
+      montarComparacaoEstimativa(p, r);
       p.mensagens.push({ papel: 'sistema', texto: `Execução terminou: ${p.estado}.`, quando: now() });
       p.retomadasAuto = 0;
       try { p.resumoFinal = resumoFinal(p, r); p.mensagens.push({ papel: 'resumo', texto: p.resumoFinal, quando: now() }); } catch (e) { console.error('resumo', e); }
@@ -906,7 +1303,9 @@ function poll() {
         save(p); evento(p, { tipo: 'pipeline', texto: `retomada automática ${n}/3` });
         startPipeline(load(p.id), true);
       } else {
-        p.estado = 'interrompido'; p.mensagens.push({ papel: 'sistema', texto: 'O processo do pipeline parou de novo depois de 3 retomadas automáticas. Veja o log e use Retomar.', quando: now() });
+        p.estado = 'interrompido';
+        montarComparacaoEstimativa(p, r);
+        p.mensagens.push({ papel: 'sistema', texto: 'O processo do pipeline parou de novo depois de 3 retomadas automáticas. Veja o log e use Retomar.', quando: now() });
         save(p); report(p, r);
       }
     } else if (h !== p.statusHash) {
@@ -978,7 +1377,8 @@ function comCacheArquivo(caminho, fn) {
     if (cacheArquivosUso.size > 2000) cacheArquivosUso.clear();
     cacheArquivosUso.set(chave, val);
     return val;
-  } catch {
+  } catch (e) {
+    console.error('calcularDemandaEAjuste:', e?.message || e);
     return null;
   }
 }
@@ -1204,25 +1604,295 @@ export function respostaUsoGeral(filtroOuPeriodo, tabela) {
     };
   }).sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0) || (b.entrada + b.saida) - (a.entrada + a.saida));
 
+  const modelosConsolidados = consolidarListaModelos(modelos, { removerZerados: true });
+
   const rotuloPeriodo = typeof filtroOuPeriodo === 'object' && filtroOuPeriodo !== null
     ? (filtroOuPeriodo.rotulo ?? filtroOuPeriodo.periodo)
     : filtroOuPeriodo;
+
+  // Consumo fora do orquestrador (Claude Code e Antigravity usados à parte). Vem de state/uso-fora.json, refeito no
+  // máximo 1x por dia em processo separado; as respostas que são de tarefas do orquestrador já saíram de lá.
+  const snap = lerUsoFora(DATA);
+  if (usoForaVencido(snap)) atualizarUsoForaEmSegundoPlano();
+  const porModeloFora = usoForaNoPeriodo(snap, (d) => noPeriodo(`${d}T12:00:00`, filtroOuPeriodo, agora));
+  const totFora = { entrada: 0, saida: 0, cacheLido: 0, cacheGravado: 0, usd: 0, brl: null };
+  const modelosFora = Object.entries(porModeloFora).map(([chave, u]) => {
+    const [provedor, ...resto] = chave.split(':');
+    const modelo = resto.join(':');
+    const c = /nao-registrado|desconhecido/.test(modelo) ? { usd: null } : custoUsd(tabela, { modelo: chave, ...u });
+    for (const k of ['entrada', 'saida', 'cacheLido', 'cacheGravado']) totFora[k] += u[k];
+    if (c.usd != null) totFora.usd += c.usd;
+    return { provedor, modelo, ...u, usd: c.usd != null ? arred(c.usd) : null, brl: c.usd != null ? emBrl(tabela, c.usd) : null, assinatura: assinaturaDe(provedor) };
+  }).filter((m) => m.entrada + m.saida + m.cacheLido + m.cacheGravado > 0)
+    .sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0) || (b.saida - a.saida));
+  totFora.usd = arred(totFora.usd);
+  totFora.brl = emBrl(tabela, totFora.usd);
+  const somaGeral = { ...totGeral };
+  for (const k of ['entrada', 'saida', 'cacheLido', 'cacheGravado']) somaGeral[k] = (totGeral[k] || 0) + totFora[k];
+  somaGeral.usd = arred((totGeral.usd || 0) + (totFora.usd || 0));
+  somaGeral.brl = emBrl(tabela, somaGeral.usd);
 
   return {
     periodo: rotuloPeriodo,
     precosAtualizados: tabela.atualizado || null,
     usdBrl: tabela.usdBrl ?? null,
-    modelos,
+    modelos: modelosConsolidados,
     total: totGeral,
     projetos: projetosNoPeriodo.size,
+    foraOrquestrador: {
+      atualizado: snap?.atualizado || null,
+      emAtualizacao: !!usoForaRodando,
+      excluidos: snap?.excluidos || null,
+      modelos: modelosFora,
+      total: totFora,
+    },
+    totalGeral: somaGeral,
     aviso: 'Claude Code e Antigravity são assinaturas: o custo é o equivalente em API.'
   };
+}
+
+// Refaz state/uso-fora.json em outro processo (varrer semanas de transcripts trava o painel se for aqui dentro).
+let usoForaRodando = null;
+export function atualizarUsoForaEmSegundoPlano({ forcar = false } = {}) {
+  if (usoForaRodando) return usoForaRodando;
+  if (!forcar && !usoForaVencido(lerUsoFora(DATA))) return null;
+  if (process.env.DELEGAR_SEM_USO_FORA === '1' || process.env.DELEGAR_PROVEDORES === 'nenhum') return null; // testes
+  usoForaRodando = new Promise((resolve) => {
+    const filho = spawn(process.execPath, [fileURLToPath(new URL('./uso-fora.mjs', import.meta.url)), DATA], { windowsHide: true, stdio: 'ignore' });
+    const fim = () => { usoForaRodando = null; resolve(); };
+    filho.on('exit', fim); filho.on('error', fim);
+  });
+  return usoForaRodando;
+}
+
+// gravar: false monta a comparação ao vivo (execução em andamento): não grava estimativas.jsonl e conta
+// o tempo das tarefas que ainda estão rodando até agora.
+export function montarComparacaoEstimativa(p, run, { dataDir = DATA, projDir = null, gravar = true } = {}) {
+  if (!p?.estimativaInicial?.tarefas) return null;
+  try {
+    const estIni = p.estimativaInicial;
+    const estTarefas = estIni.tarefas || {};
+    const tabela = carregarPrecos({ dataDir });
+    const dirDoProj = projDir || pdir(p.id);
+    const usoProj = dadosUsoProjetoComRodadas(p, {
+      projDir: dirDoProj,
+      dataDir,
+      tabela,
+      usoAgyReal: (proj, taskId, entry, pf, ini, fim, rod) => usoAgyReal(proj, taskId, entry, pf, ini, fim, rod),
+    });
+    const rodadaAtual = usoProj.rodadas?.[usoProj.rodadas.length - 1];
+    const mapaTarefasUso = Object.fromEntries((rodadaAtual?.tarefas || usoProj.tarefas).map((t) => [t.id, t]));
+    const logs = path.join(dirDoProj, 'logs');
+
+    const tarefasComp = [];
+    const listaTarefasPlano = Array.isArray(p.plano?.tarefas) ? p.plano.tarefas : [];
+
+    const calcErro = (real, est) => {
+      const r = Number(real) || 0;
+      const e = Number(est) || 0;
+      if (e > 0) return Math.round(((r - e) / e) * 10000) / 10000;
+      return null;
+    };
+
+    let somaEstEntrada = 0, somaRealEntrada = 0;
+    let somaEstSaida = 0, somaRealSaida = 0;
+    let somaEstCacheLido = 0, somaRealCacheLido = 0;
+    let somaEstCacheGravado = 0, somaRealCacheGravado = 0;
+    let somaEstDuracao = 0, somaRealDuracao = 0;
+    // Tempo total = do primeiro início ao último fim (com workers simultâneos, a soma das tarefas não é o tempo total).
+    let iniRun = Infinity, fimRun = -Infinity;
+
+    for (const t of listaTarefasPlano) {
+      const tid = String(t.id);
+      const est = estTarefas[tid] || {};
+      const tUso = mapaTarefasUso[tid]?.total || {};
+      const resPath = path.join(logs, tid, 'result.json');
+      const res = lerJson(resPath) || {};
+      const attempts = Array.isArray(res.attempts) ? res.attempts : [];
+
+      let realDuracaoSeg = 0;
+      let temHorarios = false;
+      if (attempts.length > 0) {
+        for (const a of attempts) {
+          if (a && a.started && a.finished) {
+            const ini = Date.parse(a.started);
+            const fim = Date.parse(a.finished);
+            if (Number.isFinite(ini) && Number.isFinite(fim) && fim >= ini) {
+              realDuracaoSeg += (fim - ini) / 1000;
+              temHorarios = true;
+            }
+          }
+        }
+      }
+      const emAndamento = !gravar && run?.status?.[tid]?.state === 'running';
+      if (!temHorarios || emAndamento) {
+        const ini = Date.parse(run?.status?.[tid]?.started || res.started || res.inicio || '');
+        const fim = emAndamento ? Date.now() : Date.parse(res.finished || res.fim || run?.status?.[tid]?.finished || '');
+        realDuracaoSeg = 0;
+        if (Number.isFinite(ini) && Number.isFinite(fim) && fim >= ini) {
+          realDuracaoSeg = (fim - ini) / 1000;
+        }
+      }
+      realDuracaoSeg = Math.max(0, Math.round(realDuracaoSeg));
+      {
+        const inis = attempts.map((a) => Date.parse(a?.started || '')).filter(Number.isFinite);
+        const fins = attempts.map((a) => Date.parse(a?.finished || '')).filter(Number.isFinite);
+        const i0 = inis.length ? Math.min(...inis) : Date.parse(run?.status?.[tid]?.started || res.started || '');
+        const f0 = emAndamento ? Date.now() : (fins.length ? Math.max(...fins) : Date.parse(run?.status?.[tid]?.finished || res.finished || ''));
+        if (Number.isFinite(i0)) iniRun = Math.min(iniRun, i0);
+        if (Number.isFinite(f0)) fimRun = Math.max(fimRun, f0);
+      }
+
+      const tentSucesso = attempts.slice().reverse().find(
+        (a) => a && (a.ok === true || a.failed === false || a.code === 0)
+      );
+      const tentEscolhida = tentSucesso || attempts[attempts.length - 1] || res;
+      const modeloReal = String(
+        tentEscolhida?.worker || tentEscolhida?.modelo || tentEscolhida?.model || res.model || run?.status?.[tid]?.model || ''
+      );
+
+      const estEntrada = Number(est.entrada) || 0;
+      const estSaida = Number(est.saida) || 0;
+      const estCacheLido = Number(est.cacheLido) || 0;
+      const estCacheGravado = Number(est.cacheGravado) || 0;
+      const estDuracaoSeg = Number(est.duracaoSeg) || 0;
+
+      const realEntrada = Number(tUso.entrada) || 0;
+      const realSaida = Number(tUso.saida) || 0;
+      const realCacheLido = Number(tUso.cacheLido) || 0;
+      const realCacheGravado = Number(tUso.cacheGravado) || 0;
+
+      somaEstEntrada += estEntrada;
+      somaRealEntrada += realEntrada;
+      somaEstSaida += estSaida;
+      somaRealSaida += realSaida;
+      somaEstCacheLido += estCacheLido;
+      somaRealCacheLido += realCacheLido;
+      somaEstCacheGravado += estCacheGravado;
+      somaRealCacheGravado += realCacheGravado;
+      somaEstDuracao += estDuracaoSeg;
+      somaRealDuracao += realDuracaoSeg;
+
+      const estimadoObj = {
+        entrada: estEntrada,
+        saida: estSaida,
+        cacheLido: estCacheLido,
+        cacheGravado: estCacheGravado,
+        duracaoSeg: estDuracaoSeg,
+      };
+
+      const realObj = {
+        entrada: realEntrada,
+        saida: realSaida,
+        cacheLido: realCacheLido,
+        cacheGravado: realCacheGravado,
+        duracaoSeg: realDuracaoSeg,
+      };
+
+      const erroRelObj = {
+        entrada: calcErro(realEntrada, estEntrada),
+        saida: calcErro(realSaida, estSaida),
+        cacheLido: calcErro(realCacheLido, estCacheLido),
+        cacheGravado: calcErro(realCacheGravado, estCacheGravado),
+        duracaoSeg: calcErro(realDuracaoSeg, estDuracaoSeg),
+      };
+
+      tarefasComp.push({
+        id: tid,
+        demanda: est.demanda || categoriaDemanda(t),
+        modeloAssumido: est.modeloAssumido || null,
+        modeloReal: modeloReal || null,
+        estimado: estimadoObj,
+        real: realObj,
+        erroRel: erroRelObj,
+      });
+    }
+
+    const totEstimado = {
+      entrada: somaEstEntrada,
+      saida: somaEstSaida,
+      cacheLido: somaEstCacheLido,
+      cacheGravado: somaEstCacheGravado,
+      duracaoSeg: Number(estIni.tempo?.totalSeg) > 0 ? Math.round(Number(estIni.tempo.totalSeg)) : somaEstDuracao,
+      duracaoSomadaSeg: somaEstDuracao,
+    };
+    const totReal = {
+      entrada: somaRealEntrada,
+      saida: somaRealSaida,
+      cacheLido: somaRealCacheLido,
+      cacheGravado: somaRealCacheGravado,
+      duracaoSeg: Number.isFinite(iniRun) && fimRun >= iniRun ? Math.round((fimRun - iniRun) / 1000) : somaRealDuracao,
+      duracaoSomadaSeg: somaRealDuracao,
+    };
+    const totErroRel = {
+      entrada: calcErro(somaRealEntrada, somaEstEntrada),
+      saida: calcErro(somaRealSaida, somaEstSaida),
+      cacheLido: calcErro(somaRealCacheLido, somaEstCacheLido),
+      cacheGravado: calcErro(somaRealCacheGravado, somaEstCacheGravado),
+      duracaoSeg: null,
+    };
+    totErroRel.duracaoSeg = calcErro(totReal.duracaoSeg, totEstimado.duracaoSeg);
+
+    const comp = {
+      quando: now(),
+      tarefas: tarefasComp,
+      total: {
+        estimado: totEstimado,
+        real: totReal,
+        erroRel: totErroRel,
+      },
+      gravadoEm: p.comparacaoEstimativa?.gravadoEm || null,
+    };
+
+    if (!gravar) { comp.aoVivo = true; return comp; }
+    if (!comp.gravadoEm) {
+      try {
+        const stateDir = path.join(dataDir, 'state');
+        fs.mkdirSync(stateDir, { recursive: true });
+        const jsonlPath = path.join(stateDir, 'estimativas.jsonl');
+        const linhas = tarefasComp.map((tc) => JSON.stringify({
+          projeto: p.id,
+          tarefa: tc.id,
+          quando: comp.quando,
+          modeloAssumido: tc.modeloAssumido,
+          modeloReal: tc.modeloReal,
+          demanda: tc.demanda,
+          estimado: tc.estimado,
+          real: tc.real,
+          erroRel: tc.erroRel,
+        }));
+        if (linhas.length) {
+          fs.appendFileSync(jsonlPath, linhas.join('\n') + '\n', 'utf8');
+        }
+        comp.gravadoEm = comp.quando;
+      } catch (e) {
+        console.error('erro ao gravar estimativas.jsonl:', e);
+      }
+    }
+
+    p.comparacaoEstimativa = comp;
+    return comp;
+  } catch (err) {
+    console.error('montarComparacaoEstimativa falhou:', err);
+    return null;
+  }
+}
+
+const cacheComparacao = new Map();
+function comparacaoAoVivo(p) {
+  const c = cacheComparacao.get(p.id);
+  if (c && Date.now() - c.t < 20000) return c.v;
+  const v = montarComparacaoEstimativa({ ...p, comparacaoEstimativa: null }, readRun(p), { gravar: false });
+  if (cacheComparacao.size > 200) cacheComparacao.clear();
+  cacheComparacao.set(p.id, { t: Date.now(), v });
+  return v;
 }
 
 // ---------- resumo final ----------
 // Texto para a conversa e o relatório: o que cada tarefa entregou, com qual modelo, trocas, falhas e commits.
 function resumoFinal(p, run) {
   run = run || readRun(p);
+  if (!p.comparacaoEstimativa) montarComparacaoEstimativa(p, run);
   const L = [`Resumo da execução (${p.estado === 'concluido' ? 'concluída' : 'incompleta'}):`];
   const logs = path.join(pdir(p.id), 'logs');
   const tabela = carregarPrecos({ dataDir: DATA });
@@ -1275,6 +1945,18 @@ function resumoFinal(p, run) {
   const totAtualBrlStr = totAtual.brl !== null ? ` (R$ ${totAtual.brl.toFixed(2)})` : '';
   const rotuloExec = (usoProj.rodadas?.length || 0) > 1 ? `Total da execucao (rodada ${rodadaAtual?.numero || usoProj.rodadas.length})` : 'Total da execucao';
   L.push(`${rotuloExec}: tokens: entrada ${totAtual.entrada}, saida ${totAtual.saida}, cache lido ${totAtual.cacheLido}, cache gravado ${totAtual.cacheGravado} · ~US$ ${totAtualUsdStr}${totAtualBrlStr} (${totAtual.origem})`);
+
+  if (p.comparacaoEstimativa?.total) {
+    const tot = p.comparacaoEstimativa.total;
+    const fmtErro = (val) => {
+      if (val == null || !Number.isFinite(val)) return '-';
+      const pct = Math.round(val * 100);
+      return `${pct >= 0 ? '+' : ''}${pct}%`;
+    };
+    const errEnt = fmtErro(tot.erroRel?.entrada);
+    const errTempo = fmtErro(tot.erroRel?.duracaoSeg);
+    L.push(`Estimativa x real: erro total de tokens ${errEnt}, tempo ${errTempo}.`);
+  }
 
   if ((usoProj.rodadas?.length || 0) > 1) {
     L.push('', 'Totais por rodada:');
@@ -1444,7 +2126,7 @@ const safeEq = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(Str
 
 function modoPublico(p) {
   const m = cfgDe(p);
-  return { planner: m.planner, tiers: m.tiers, fix: m.fix, coord: m.coord, maxConcurrent: m.maxConcurrent, base: m.base || null, semGratuitos: !!m.semGratuitos };
+  return { planner: m.planner, tiers: tiersDe(m, velDe(p)), fix: m.fix, coord: m.coord, maxConcurrent: m.maxConcurrent, base: m.base || null, semGratuitos: !!m.semGratuitos };
 }
 // Projeto que roda ou cujo planejador responde não pode ser arquivado nem excluído.
 function ocupadoDemais(p) { return p.estado === 'executando' || !!p.ocupado || !!(p.pid && alive(p.pid)); }
@@ -1457,14 +2139,17 @@ function publicView(p, full) {
   if ((!Array.isArray(p.rodadas) || !p.rodadas.length) && fs.existsSync(path.join(pdir(p.id), 'rodadas'))) {
     migrarRodadas(p, { projDir: pdir(p.id), dataDir: DATA, gravar: !ocupadoDemais(p) });
   }
-  const v = { id: p.id, titulo: p.titulo, modo: p.modo, modoNome: nomeModo(p), velocidade: velDe(p), supervisao: supDe(p), estado: p.estado, auto: p.auto, repo: p.repo, criado: p.criado, inicio: p.inicio, fim: p.fim, ocupado: !!p.ocupado, arquivado: !!p.arquivado, perfil: p.perfil || null, rodadas: Array.isArray(p.rodadas) ? p.rodadas.length : 0 };
+  const v = { id: p.id, titulo: p.titulo, modo: p.modo, modoNome: nomeModo(p), velocidade: velDe(p), supervisao: supDe(p), estado: p.estado, auto: p.auto, repo: p.repo, criado: p.criado, inicio: p.inicio, fim: p.fim, ocupado: !!p.ocupado, arquivado: !!p.arquivado, perfil: p.perfil || null, rodadas: Array.isArray(p.rodadas) ? p.rodadas.length : 0, agendamento: resumoAgendamento(p), politicaCota: p.politicaCota || (p.auto ? 'auto' : 'ignorar'), ajusteCota: p.ajusteCota ? { politica: p.ajusteCota.politica, nome: NOMES_POLITICA[p.ajusteCota.politica] || p.ajusteCota.politica, quando: p.ajusteCota.quando, mudancas: p.ajusteCota.mudancas || [] } : null };
   if (!full) { v.gates = p.estado === 'executando' ? gatesPendentes(p).length : 0; return v; }
   v.pedido = p.pedido; v.mensagens = p.mensagens; v.planejador = p.planejador || null;
   v.config = modoPublico(p); v.plannerEfetivo = adaptar(cfgDe(p).planner);
   if (p.plano) {
     let vol = 0;
     v.plano = { ...p.plano, tarefas: p.plano.tarefas.map((t) => ({ ...t, cadeiaEfetiva: chainFor(p, t, t.nivel === 'volume' ? vol++ : 0) })) };
+    v.demanda = p.demanda || calcularDemandaEAjuste(p);
   }
+  // Em execução, a comparação é ao vivo (cópia do projeto, nada gravado; cache de 20 s por projeto).
+  v.comparacaoEstimativa = p.estado === 'executando' ? comparacaoAoVivo(p) : (p.comparacaoEstimativa || null);
   v.run = readRun(p);
   v.relatorio = path.join(VAULT, 'orquestracao', `${p.id}.md`);
   if (Array.isArray(p.rodadas) && p.rodadas.length > 0) {
@@ -1662,12 +2347,18 @@ async function api(req, res, url) {
   if (parts[1] === 'saude') return send(res, 200, { ok: true });
   if (!safeEq(req.headers['x-delegar-token'] || '', TOKEN)) return send(res, 401, { erro: 'token inválido' });
   if (req.method === 'GET' && parts[1] === 'modos') {
-    const modos = Object.fromEntries(Object.entries(MODES).map(([k, m]) => [k, { nome: m.nome, descricao: m.descricao, tiers: m.tiers, planner: m.planner, fix: m.fix, coord: m.coord, maxConcurrent: m.maxConcurrent, plannerEfetivo: adaptar(m.planner) }]));
+    const modos = Object.fromEntries(Object.entries(MODES).map(([k, m]) => [k, { nome: m.nome, descricao: m.descricao, tiers: m.tiers, porVelocidade: m.porVelocidade || null, planner: m.planner, fix: m.fix, coord: m.coord, maxConcurrent: m.maxConcurrent, plannerEfetivo: adaptar(m.planner) }]));
     return send(res, 200, { modos, supervisao: SUPERVISAO, velocidade: VELOCIDADE, ultimoPersonalizado: lerJson(CUSTOM_FILE), padraoPersonalizado: modoComoCustom('padrao') });
   }
   if (parts[1] === 'perfis') return await rotaPerfis(req, res, parts);
   if (parts[1] === 'cotas') return await rotaCotas(req, res, parts);
   if (parts[1] === 'uso') {
+    if (parts[2] === 'atualizar-fora' && parts.length === 3) {
+      if (req.method !== 'POST') return send(res, 405, { erro: 'método não permitido' });
+      await atualizarUsoForaEmSegundoPlano({ forcar: true });
+      const snapF = lerUsoFora(DATA);
+      return send(res, 200, { atualizado: snapF?.atualizado || null, excluidos: snapF?.excluidos || null });
+    }
     if (parts.length > 2) return send(res, 404, { erro: 'não encontrado' });
     if (req.method !== 'GET') return send(res, 405, { erro: 'método não permitido' });
     const filtro = parseFiltroUso(url.searchParams);
@@ -1722,16 +2413,39 @@ async function api(req, res, url) {
     if (pedido.length < 5 || pedido.length > 50000) return send(res, 400, { erro: 'pedido vazio ou longo demais' });
     if (!b.repo || !fs.existsSync(repo) || !fs.statSync(repo).isDirectory()) return send(res, 400, { erro: 'repositório não encontrado' });
     if (b.velocidade != null && !temVel(b.velocidade)) return send(res, 400, { erro: 'velocidade inválida' });
+    const politicasValidas = new Set(['ignorar', 'auto', 'economizar', 'usar_melhor']);
+    if (b.politicaCota != null && !politicasValidas.has(String(b.politicaCota))) return send(res, 400, { erro: 'política de cota inválida' });
+    const agInput = b.agendamento && typeof b.agendamento === 'object'
+      ? b.agendamento
+      : (b.planejarEm != null || b.executarEm != null || b.executarAposPlanejar != null
+          ? { planejarEm: b.planejarEm, executarEm: b.executarEm, executarAposPlanejar: b.executarAposPlanejar }
+          : null);
+    let agValidado = null;
+    if (agInput) {
+      const valAg = validarAgendamentoInput(agInput);
+      if (!valAg.ok) return send(res, 400, { erro: valAg.erro || 'agendamento inválido' });
+      agValidado = valAg.agendamento;
+    }
     const titulo = String(b.titulo || pedido.split('\n')[0]).slice(0, 120);
     const d = new Date(); const z = (n) => String(n).padStart(2, '0');
     const stamp = `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}${z(d.getHours())}${z(d.getMinutes())}`;
     const p = { id: `${stamp}-${slug(titulo)}-${crypto.randomBytes(2).toString('hex')}`, titulo, tituloFixo: !!b.titulo, pedido, repo, modo: 'padrao', auto: !!b.auto,
       velocidade: temVel(b.velocidade) ? b.velocidade : 'auto',
       supervisao: temSup(b.supervisao) ? b.supervisao : 'automatico',
+      politicaCota: b.politicaCota != null ? String(b.politicaCota) : (b.auto ? 'auto' : 'ignorar'),
       criado: now(), estado: 'planejando', mensagens: [{ papel: 'usuario', texto: pedido, quando: now() }], sessao: null, plano: null, uso: { chamadas: [] } };
     const erro = aplicarModo(p, { modo: b.modo || 'padrao', custom: b.custom, perfil: b.perfil });
     if (erro) return send(res, 400, { erro });
     if (!adaptar(cfgDe(p).planner).length) return send(res, 400, { erro: 'nenhuma CLI de IA (claude, agy ou opencode) encontrada neste PC' });
+    if (agValidado) {
+      aplicarAgendamentoNoProjeto(p, agValidado);
+      if (agValidado.planejarEm && Number(agValidado.planejarEm) > Date.now()) {
+        const resumo = resumoAgendamento(p);
+        p.mensagens.push({ papel: 'sistema', texto: `Planejamento agendado (${resumo?.texto || 'horário futuro'}).`, quando: now() });
+        save(p);
+        return send(res, 201, publicView(p, true));
+      }
+    }
     save(p);
     plannerTurn(p, pedido).catch((e) => console.error(e));
     return send(res, 201, publicView(p, true));
@@ -1776,8 +2490,51 @@ async function api(req, res, url) {
       plannerTurn(p, 'Gere o plano final.', { gerar: true }).catch((e) => console.error(e));
       return send(res, 202, { ok: true });
     }
+    case 'plano': {
+      desarquivarSePreciso(p);
+      if (running) return send(res, 409, { erro: 'execução em andamento' });
+      const plan = b.plano || b;
+      const errs = validatePlan(plan, isGitRepo(p.repo));
+      if (errs.length) return send(res, 400, { erro: 'Plano recusado: ' + errs.join('; ') });
+      if (temRodadaExecutada(p, pdir(p.id))) arquivarRodadaSePreciso(p);
+      p.plano = plan; p.estado = 'plano_pronto'; p._corrigido = false;
+      if (plan.titulo && !p.tituloFixo) p.titulo = String(plan.titulo).slice(0, 120);
+      const dem = calcularDemandaSegura(p);
+      p.demanda = dem;
+      const baseTexto = `Plano recebido: ${plan.tarefas.length} tarefas.`;
+      const textoMsg = dem?.linhaResumo ? `${baseTexto}\n${dem.linhaResumo}` : baseTexto;
+      p.mensagens.push({ papel: 'sistema', texto: textoMsg, quando: now() });
+      save(p);
+      report(p);
+      if (p.agendamento?.executarEm && Number(p.agendamento.executarEm) > Date.now() && !p.agendamento?.execucaoDisparadaEm) {
+        const resumo = resumoAgendamento(p);
+        p.mensagens.push({ papel: 'sistema', texto: `Plano pronto. Aguardando horário agendado (${resumo?.texto || 'execução futura'}).`, quando: now() });
+        save(p);
+        report(p);
+        return send(res, 200, publicView(p, true));
+      }
+      if (p.auto) {
+        startPipeline(p);
+        return send(res, 200, publicView(p, true));
+      }
+      return send(res, 200, publicView(p, true));
+    }
     case 'ajustes': {
-      if (running && (b.modo != null || b.perfil != null || b.niveis != null || b.esforcos != null || typeof b.auto === 'boolean' || b.velocidade != null || b.cadeias != null)) return send(res, 409, { erro: 'execução em andamento' });
+      if (running && (b.modo != null || b.perfil != null || b.niveis != null || b.esforcos != null || typeof b.auto === 'boolean' || b.velocidade != null || b.cadeias != null || b.agendamento !== undefined || b.politicaCota != null || b.aplicarAjusteCota != null)) return send(res, 409, { erro: 'execução em andamento' });
+      if (b.politicaCota != null) {
+        if (!['ignorar', 'auto', 'economizar', 'usar_melhor'].includes(String(b.politicaCota))) return send(res, 400, { erro: 'política de cota inválida' });
+        p.politicaCota = String(b.politicaCota);
+      }
+      if (b.agendamento !== undefined) {
+        const valAg = validarAgendamentoInput(b.agendamento === null ? { cancelar: true } : b.agendamento);
+        if (!valAg.ok) return send(res, 400, { erro: valAg.erro || 'agendamento inválido' });
+        if (!valAg.cancelar) {
+          const checagem = podeAgendar(p, valAg.agendamento);
+          if (!checagem.ok) return send(res, 400, { erro: checagem.erro });
+        }
+        aplicarAgendamentoNoProjeto(p, valAg.cancelar ? null : valAg.agendamento);
+        p.mensagens.push({ papel: 'sistema', texto: valAg.cancelar ? 'Agendamento cancelado.' : `Agendamento atualizado (${resumoAgendamento(p)?.texto || 'ativo'}).`, quando: now() });
+      }
       if (b.cadeias != null) {
         if (!b.cadeias || typeof b.cadeias !== 'object' || Array.isArray(b.cadeias)) return send(res, 400, { erro: 'cadeia inválida' });
         for (const [, cad] of Object.entries(b.cadeias)) {
@@ -1798,6 +2555,8 @@ async function api(req, res, url) {
             } else {
               t.cadeia = [...cad];
             }
+            // Cadeia efetiva antiga ganharia da nova na estimativa (estimarDemandaPlano a lê primeiro).
+            delete t.cadeiaEfetiva;
           }
         }
       }
@@ -1814,8 +2573,61 @@ async function api(req, res, url) {
       if (typeof b.auto === 'boolean') p.auto = b.auto;
       if (p.plano && b.niveis && typeof b.niveis === 'object') for (const t of p.plano.tarefas) if (NIVEIS.includes(b.niveis[t.id])) t.nivel = b.niveis[t.id];
       if (p.plano && b.esforcos && typeof b.esforcos === 'object') for (const t of p.plano.tarefas) if (['low', 'medium', 'high'].includes(b.esforcos[t.id])) t.esforco = b.esforcos[t.id];
+      if (p.plano && !running && (b.modo != null || b.perfil != null || b.velocidade != null || b.niveis != null || b.esforcos != null || b.cadeias != null)) {
+        atualizarMensagemPlanoRecebido(p);
+      }
+      if (b.aplicarAjusteCota != null) {
+        const modoPol = String(b.aplicarAjusteCota);
+        if (!['auto', 'economizar', 'usar_melhor', 'ignorar'].includes(modoPol)) return send(res, 400, { erro: 'política de cota inválida' });
+        p.politicaCota = modoPol;
+        if (p.plano) {
+          const resAj = aplicarAjusteCotaNoPlano(p, modoPol);
+          p.mensagens.push({ papel: 'sistema', texto: `Ajuste por cota (${NOMES_POLITICA[modoPol] || modoPol}): ${resAj.texto}.`, quando: now() });
+        }
+      }
       save(p); report(p);
       return send(res, 200, publicView(p, true));
+    }
+    case 'agendar': {
+      if (running) return send(res, 409, { erro: 'execução em andamento' });
+      const valAg = validarAgendamentoInput(b);
+      if (!valAg.ok) return send(res, 400, { erro: valAg.erro || 'agendamento inválido' });
+      if (!valAg.cancelar) {
+        const checagem = podeAgendar(p, valAg.agendamento);
+        if (!checagem.ok) return send(res, 400, { erro: checagem.erro });
+      }
+      desarquivarSePreciso(p);
+      aplicarAgendamentoNoProjeto(p, valAg.cancelar ? null : valAg.agendamento);
+      const resumo = resumoAgendamento(p);
+      p.mensagens.push({
+        papel: 'sistema',
+        texto: valAg.cancelar ? 'Agendamento cancelado.' : `Agendamento salvo (${resumo?.texto || 'ativo'}).`,
+        quando: now(),
+      });
+      save(p); report(p);
+      return send(res, 200, publicView(p, true));
+    }
+    case 'aplicar-ajuste-cota': {
+      desarquivarSePreciso(p);
+      if (running) return send(res, 409, { erro: 'execução em andamento' });
+      if (!p.plano) return send(res, 400, { erro: 'sem plano' });
+      const modoPol = String(b.politica || b.modo || 'auto');
+      if (!['auto', 'economizar', 'usar_melhor', 'ignorar', 'personalizado'].includes(modoPol)) return send(res, 400, { erro: 'política de cota inválida' });
+      const escolhas = escolhasPersonalizadas(b.cadeias);
+      if (escolhas === false) return send(res, 400, { erro: 'modelo inválido na escolha personalizada' });
+      const resAj = aplicarAjusteCotaNoPlano(p, modoPol, { cadeias: escolhas });
+      p.mensagens.push({ papel: 'sistema', texto: `Ajuste por cota (${NOMES_POLITICA[modoPol] || modoPol}): ${resAj.texto}.`, quando: now() });
+      save(p); report(p);
+      return send(res, 200, publicView(p, true));
+    }
+    case 'previa-ajuste-cota': {
+      if (!p.plano) return send(res, 400, { erro: 'sem plano' });
+      const modoPol = String(b.politica || 'auto');
+      if (!['auto', 'economizar', 'usar_melhor', 'ignorar', 'personalizado'].includes(modoPol)) return send(res, 400, { erro: 'política de cota inválida' });
+      const escolhas = escolhasPersonalizadas(b.cadeias);
+      if (escolhas === false) return send(res, 400, { erro: 'modelo inválido na escolha personalizada' });
+      const { _cadeias, _esforcos, ...pv } = previaAjusteCota(p, modoPol, { cadeias: escolhas }) || {};
+      return send(res, 200, pv);
     }
     case 'confirmar': {
       if (!running) return send(res, 409, { erro: 'nada em execução' });
@@ -1893,24 +2705,41 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// Projetos que ficaram "planejando" quando o servidor caiu
-for (const p of listAll()) if (p.ocupado) { p.ocupado = false; p.mensagens.push({ papel: 'sistema', texto: 'O servidor reiniciou durante a resposta do planejador. Envie a mensagem de novo.', quando: now() }); save(p); }
-detectar();
-setInterval(poll, 10000);
-server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `porta ${PORT} já em uso; outro painel está no ar` : e); process.exit(1); });
-const checagemHost = validarHostEscuta();
-if (!checagemHost.ok) {
-  console.error(checagemHost.erro);
-  process.exit(1);
+const ehPrincipal = (() => {
+  try {
+    const a = path.resolve(process.argv[1] || '').toLowerCase();
+    const b = fileURLToPath(import.meta.url).toLowerCase();
+    return a === b;
+  } catch {
+    return false;
+  }
+})();
+
+if (ehPrincipal) {
+  // Primeiro as checagens que podem encerrar o processo; só depois mexe nos projetos.
+  const checagemHost = validarHostEscuta();
+  if (!checagemHost.ok) {
+    console.error(checagemHost.erro);
+    process.exit(1);
+  }
+  server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `porta ${PORT} já em uso; outro painel está no ar` : e); process.exit(1); });
+  server.listen(PORT, '127.0.0.1', () => {
+    // Projetos que ficaram "planejando" quando o servidor caiu. Só depois de a porta abrir: um segundo
+    // servidor (porta ocupada) sai sem tocar no planejador que o painel no ar ainda está rodando.
+    for (const p of listAll()) if (p.ocupado) { p.ocupado = false; p.mensagens.push({ papel: 'sistema', texto: 'O servidor reiniciou durante a resposta do planejador. Envie a mensagem de novo.', quando: now() }); save(p); }
+    detectar();
+    setInterval(poll, 10000);
+    // Consumo fora do orquestrador: confere 1x por hora se o resumo passou de 24 h (a leitura em si roda à parte).
+    setTimeout(() => atualizarUsoForaEmSegundoPlano(), 60000);
+    setInterval(() => atualizarUsoForaEmSegundoPlano(), 3600e3).unref?.();
+    console.log(`Delegar em http://127.0.0.1:${PORT} (pid ${process.pid}) · provedores: ${Object.entries(detectar()).filter(([, v]) => v).map(([k]) => k).join(', ') || 'nenhum'}`);
+    // Descoberta de modelos em segundo plano: o painel já responde enquanto ela roda.
+    iniciarDescoberta({ dataDir: DATA }).then((r) => console.log(`descoberta de modelos: ${r.novos.length} novos; erros: ${Object.keys(r.erros).length ? Object.entries(r.erros).map(([k, v]) => k + ': ' + v).join('; ') : 'nenhum'}`)).catch((e) => console.error('descoberta de modelos falhou:', e));
+    // Atualização de preços se vencidos (> 30 dias) em segundo plano
+    atualizarSeVencido({ dataDir: DATA }).then((r) => {
+      if (r.pulou) console.log(`preços: tabela em dia (${idadeDias(r.tabela)} dias).`);
+      else if (r.ok) console.log(`preços atualizados: ${r.atualizados} modelos${r.aviso ? ' (' + r.aviso + ')' : ''}.`);
+      else console.error(`atualização de preços: ${r.aviso || 'falha'}`);
+    }).catch((e) => console.error('atualização de preços falhou:', e));
+  });
 }
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`Delegar em http://127.0.0.1:${PORT} (pid ${process.pid}) · provedores: ${Object.entries(detectar()).filter(([, v]) => v).map(([k]) => k).join(', ') || 'nenhum'}`);
-  // Descoberta de modelos em segundo plano: o painel já responde enquanto ela roda.
-  iniciarDescoberta({ dataDir: DATA }).then((r) => console.log(`descoberta de modelos: ${r.novos.length} novos; erros: ${Object.keys(r.erros).length ? Object.entries(r.erros).map(([k, v]) => k + ': ' + v).join('; ') : 'nenhum'}`)).catch((e) => console.error('descoberta de modelos falhou:', e));
-  // Atualização de preços se vencidos (> 30 dias) em segundo plano
-  atualizarSeVencido({ dataDir: DATA }).then((r) => {
-    if (r.pulou) console.log(`preços: tabela em dia (${idadeDias(r.tabela)} dias).`);
-    else if (r.ok) console.log(`preços atualizados: ${r.atualizados} modelos${r.aviso ? ' (' + r.aviso + ')' : ''}.`);
-    else console.error(`atualização de preços: ${r.aviso || 'falha'}`);
-  }).catch((e) => console.error('atualização de preços falhou:', e));
-});

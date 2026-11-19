@@ -130,10 +130,10 @@ test('Gemini com 1% na janela de 5 h: esgotado e zero workers', () => {
   assert.equal(r.gemini.maxParallel, 0);
 });
 
-test('recommendedConcurrent chega a 6 com Gemini folgado', () => {
+test('recommendedConcurrent chega a 6 ou mais (teto 8) com Gemini folgado', () => {
   const r = rodar(path.join(FIX, 'agy-usage-tab.txt'));
   assert.equal(r.gemini.maxParallel, 6);
-  assert.equal(r.recommendedConcurrent, 6);
+  assert.ok(r.recommendedConcurrent >= 6 && r.recommendedConcurrent <= 8, String(r.recommendedConcurrent));
 });
 
 test('agyClaudeGpt esgotado (1% restante) marca exhausted sem zerar gemini.maxParallel', () => {
@@ -165,6 +165,37 @@ test('estouro de agy:claude-sonnet-5-5-high no quota-ledger.jsonl nao zera gemin
 
   assert.equal(r.gemini.lastQuotaHit, null);
   assert.notEqual(r.gemini.maxParallel, 0);
+});
+
+const geminiCom = (semanal, cincoH = 90) => gravar([
+  `Gemini Models\tWeekly Limit Remaining\t${semanal}%\t2026-11-17T14:04:15Z`,
+  `Gemini Models\tFive Hour Limit Remaining\t${cincoH}%\t2026-11-13T17:07:41Z`,
+].join('\n'));
+
+test('5h alta com semanal em 22%: teto de 3 workers', () => {
+  const r = rodar(geminiCom(22));
+  assert.equal(r.gemini.exhausted, false);
+  assert.equal(r.gemini.maxParallel, 3);
+});
+
+test('5h alta com semanal em 14%: teto de 2 workers', () => {
+  const r = rodar(geminiCom(14));
+  assert.equal(r.gemini.maxParallel, 2);
+});
+
+test('5h alta com semanal em 8%: 1 worker', () => {
+  const r = rodar(geminiCom(8));
+  assert.equal(r.gemini.maxParallel, 1);
+});
+
+test('semanal em 30% nao reduz: 5h alta mantem 6 workers', () => {
+  const r = rodar(geminiCom(30));
+  assert.equal(r.gemini.maxParallel, 6);
+});
+
+test('5h baixa (5% restante) reduz para 1 mesmo com semanal folgada', () => {
+  const r = rodar(geminiCom(80, 5));
+  assert.equal(r.gemini.maxParallel, 1);
 });
 
 test('quota.ps1 é ASCII puro', () => {

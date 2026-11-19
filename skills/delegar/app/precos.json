@@ -280,6 +280,18 @@
       "manual": false,
       "nota": "Pagina do Google: sobe para 4 / 20 / 0,20 a partir de 01/12/2026."
     },
+    "gemini-4-neon": {
+      "entrada": 3,
+      "saida": 15,
+      "cacheLido": 0.15,
+      "cacheGravado": null,
+      "cacheGravado1h": null,
+      "fonte": "google",
+      "litellm": "gemini/gemini-4-neon",
+      "aproximado": false,
+      "parente": null,
+      "manual": false
+    },
     "gemini-3.1-pro-preview": {
       "entrada": 2,
       "saida": 12,
@@ -318,6 +330,94 @@
       "parente": "gemini-3.1-pro-preview",
       "manual": false,
       "nota": "Sem preco publico; usa o Gemini 3.1 Pro como parente mais proximo."
+    },
+    "gemini-pro-orchestrator-neon": {
+      "entrada": 3,
+      "saida": 15,
+      "cacheLido": 0.15,
+      "cacheGravado": null,
+      "cacheGravado1h": null,
+      "fonte": "manual",
+      "litellm": null,
+      "aproximado": true,
+      "parente": "gemini-4-neon",
+      "manual": false,
+      "nota": "Sem preco publico; usa o Gemini 4 Neon como parente mais proximo."
+    },
+    "glm-5.3-flash": {
+      "entrada": 0.1,
+      "saida": 0.4,
+      "cacheLido": 0.01,
+      "cacheGravado": 0.1,
+      "cacheGravado1h": 0.1,
+      "fonte": "manual",
+      "aproximado": true,
+      "parente": null,
+      "manual": true,
+      "nota": "Preco de referencia (nao oficial) para estimar o equivalente de API dos gratuitos do opencode; conferir com o provedor."
+    },
+    "minimax-m3.1-flash": {
+      "entrada": 0.3,
+      "saida": 1.2,
+      "cacheLido": 0.03,
+      "cacheGravado": 0.3,
+      "cacheGravado1h": 0.3,
+      "fonte": "manual",
+      "aproximado": true,
+      "parente": null,
+      "manual": true,
+      "nota": "Preco de referencia (nao oficial) para estimar o equivalente de API dos gratuitos do opencode; conferir com o provedor."
+    },
+    "deepseek-v4.1-flash": {
+      "entrada": 0.14,
+      "saida": 0.28,
+      "cacheLido": 0.014000000000000002,
+      "cacheGravado": 0.14,
+      "cacheGravado1h": 0.14,
+      "fonte": "manual",
+      "aproximado": true,
+      "parente": null,
+      "manual": true,
+      "nota": "Preco de referencia (nao oficial) para estimar o equivalente de API dos gratuitos do opencode; conferir com o provedor."
+    },
+    "minimax-m3": {
+      "entrada": 0.3,
+      "saida": 1.2,
+      "cacheLido": 0.06,
+      "cacheGravado": null,
+      "cacheGravado1h": null,
+      "fonte": "minimax",
+      "litellm": null,
+      "aproximado": false,
+      "parente": null,
+      "manual": true,
+      "nota": "Pagina oficial de precos da MiniMax (platform.minimax.io/docs/guides/pricing-paygo), conferida em 18/11/2026. Tarifa Standard ate 512k tokens de entrada (acima: 0,60 / 2,40 / 0,12). Cache gravado nao informado: cobra como entrada. A pagina nao traz data de atualizacao."
+    },
+    "minimax-m2.5": {
+      "entrada": 0.3,
+      "saida": 1.2,
+      "cacheLido": 0.03,
+      "cacheGravado": null,
+      "cacheGravado1h": null,
+      "fonte": "manual",
+      "litellm": null,
+      "aproximado": true,
+      "parente": null,
+      "manual": true,
+      "nota": "Aproximado, conferido em 18/11/2026. Nao consta na pagina oficial de precos da MiniMax; agregadores listam 0,30 / 1,20 (OpenRouter: DigitalOcean, GMICloud, AtlasCloud, Venice de 0,27 / 0,95). Cache lido de um unico agregador. Um agregador indica aposentadoria do M2.5 em 18/11/2026: confirmar antes de usar."
+    },
+    "minimax-m2.7": {
+      "entrada": 0.3,
+      "saida": 1.2,
+      "cacheLido": 0.06,
+      "cacheGravado": null,
+      "cacheGravado1h": null,
+      "fonte": "manual",
+      "litellm": null,
+      "aproximado": true,
+      "parente": null,
+      "manual": true,
+      "nota": "Aproximado, conferido em 18/11/2026. Nao consta na pagina oficial de precos da MiniMax; agregadores listam 0,30 / 1,20 (OpenRouter: GMICloud 0,21 / 0,84, Groq 0,60 / 1,80). Cache lido de um agregador. Um agregador indica aposentadoria do M2.7 em 18/11/2026: confirmar antes de usar."
     }
   },
   "aliases": {
@@ -330,7 +430,11 @@
     "claude-haiku-latest": "claude-haiku-5-5",
     "claude-fable-latest": "claude-fable-5-2",
     "gemini-pro-latest": "gemini-3.1-pro-preview",
-    "gemini-3.1-pro": "gemini-3.1-pro-preview"
+    "gemini-3.1-pro": "gemini-3.1-pro-preview",
+    "openrouter/minimax/minimax-m2.5": "minimax-m2.5",
+    "openrouter/minimax/minimax-m2.7": "minimax-m2.7",
+    "openrouter/minimax/minimax-m3": "minimax-m3",
+    "openrouter/minimax/minimax-m3.1-flash": "minimax-m3.1-flash"
   },
   "gratuitos": [
     "opencode/*-free",

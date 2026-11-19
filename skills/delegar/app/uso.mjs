@@ -31,6 +31,104 @@ function partes(entry, provPadrao) {
   return { provedor: provPadrao || 'desconhecido', modelo: s };
 }
 
+// ---------- normalização e agrupamento de modelos ----------
+const somaOuNull = (a, b) => (a === null ? b : (b === null ? a : a + b));
+
+// Remove o sufixo de esforço e o prefixo do próprio provedor:
+// 'claude:haiku@high' com provedor 'claude' -> 'haiku'; com provedor 'opencode' fica 'claude:haiku'.
+export function normalizarIdModeloUso(provedor, modelo) {
+  try {
+    const prov = String(provedor ?? '').trim().toLowerCase();
+    let mod = modeloSemEsforco(modelo).trim();
+    const i = mod.indexOf(':');
+    if (i > 0) {
+      const prefixo = mod.slice(0, i).toLowerCase();
+      if (prefixo === prov || (!prov && PROVEDORES.includes(prefixo))) mod = mod.slice(i + 1);
+    }
+    return mod;
+  } catch { return ''; }
+}
+
+// 'sonnet' e 'claude-sonnet-5-5' são o mesmo modelo: resolve apelidos do claude para agrupar.
+const ALIASES_CLAUDE = {
+  sonnet: 'claude-sonnet-5-5',
+  'claude-sonnet-5-5': 'claude-sonnet-5-5',
+  haiku: 'claude-haiku-5-5',
+  'claude-haiku-5-5': 'claude-haiku-5-5',
+  opus: 'claude-opus-5-5',
+  'claude-opus-5-5': 'claude-opus-5-5',
+  fable: 'claude-fable-5-2',
+  'claude-fable-5-2': 'claude-fable-5-2',
+};
+
+// Chave de agrupamento: 'provedor:modelo-canônico', tolerante a apelido, maiúsculas e sufixo de esforço.
+export function chaveAgrupamentoModelo(provedor, modelo) {
+  try {
+    const prov = String(provedor ?? '').trim().toLowerCase() || 'desconhecido';
+    const mod = normalizarIdModeloUso(provedor, modelo);
+    const apelido = mod.toLowerCase();
+    return `${prov}:${ALIASES_CLAUDE[apelido] ?? mod}`;
+  } catch { return 'desconhecido:desconhecido'; }
+}
+
+// Verdadeiro quando a linha tem tokens ou custo acima de zero.
+export function temConsumoReal(item) {
+  try {
+    if (!item || typeof item !== 'object') return false;
+    const tokens = num(item.entrada) + num(item.saida) + num(item.cacheLido) + num(item.cacheGravado);
+    return tokens > 0 || item.custoCliUsd > 0 || item.usd > 0;
+  } catch { return false; }
+}
+
+// Junta linhas do mesmo modelo (apelido, maiúsculas, sufixo de esforço) e descarta as de zero tokens/custo.
+// Representante: pontua 2 quando tem consumo real e 1 quando o nome bate com o canônico; a primeira vence em empate.
+// Soma entrada/saida/cache e custo; os demais campos vêm do representante. Não altera a entrada.
+export function consolidarListaModelos(modelos, { removerZerados = true } = {}) {
+  try {
+    const porChave = new Map();
+    const ordem = [];
+    for (const l of (Array.isArray(modelos) ? modelos : [])) {
+      if (!l || typeof l !== 'object') continue;
+      const chave = String(chaveAgrupamentoModelo(l.provedor, l.modelo)).toLowerCase();
+      if (!porChave.has(chave)) { porChave.set(chave, []); ordem.push(chave); }
+      porChave.get(chave).push(l);
+    }
+    const out = [];
+    for (const chave of ordem) {
+      const grupo = porChave.get(chave);
+      const canônico = chave.slice(chave.indexOf(':') + 1);
+      let rep = grupo[0];
+      let melhor = (temConsumoReal(rep) ? 2 : 0) + (String(rep.modelo ?? '').toLowerCase() === canônico ? 1 : 0);
+      for (const l of grupo.slice(1)) {
+        const pont = (temConsumoReal(l) ? 2 : 0) + (String(l.modelo ?? '').toLowerCase() === canônico ? 1 : 0);
+        if (pont > melhor) { rep = l; melhor = pont; }
+      }
+      if (removerZerados && !temConsumoReal(rep)) continue;
+      const mescla = {
+        ...rep,
+        entrada: grupo.reduce((s, l) => s + num(l.entrada), 0),
+        saida: grupo.reduce((s, l) => s + num(l.saida), 0),
+        cacheLido: grupo.reduce((s, l) => s + num(l.cacheLido), 0),
+        cacheGravado: grupo.reduce((s, l) => s + num(l.cacheGravado), 0),
+      };
+      for (const campo of ['usd', 'brl']) {
+        if (grupo.some((l) => Object.prototype.hasOwnProperty.call(l, campo))) {
+          let valor = null;
+          for (const l of grupo) valor = somaOuNull(valor, numOuNull(l[campo]));
+          mescla[campo] = arred(valor);
+        }
+      }
+      if (grupo.some((l) => Object.prototype.hasOwnProperty.call(l, 'custoCliUsd'))) {
+        let cli = null;
+        for (const l of grupo) cli = somaOuNull(cli, numOuNull(l.custoCliUsd));
+        mescla.custoCliUsd = arred(cli);
+      }
+      out.push(mescla);
+    }
+    return out;
+  } catch { return []; }
+}
+
 function linhaModelo(provedor, modelo, t, custo) {
   return {
     provedor, modelo,

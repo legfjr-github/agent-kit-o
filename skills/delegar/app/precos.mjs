@@ -61,7 +61,7 @@ const globParaRegex = (g) => new RegExp('^' + g.toLowerCase().replace(/[.+?^${}(
 // Variantes do id, da mais literal para a mais normalizada (cada passo vale para os seguintes).
 function variantes(modelo) {
   let m = String(modelo ?? '').trim().toLowerCase();
-  m = m.replace(/\[[^\]]*\]$/, '').replace(/@(low|medium|high|xhigh|max)$/, '');
+  m = m.replace(/^(claude|agy|opencode):/, '').replace(/\[[^\]]*\]$/, '').replace(/@(low|medium|high|xhigh|max)$/, '');
   const lista = [m];
   const passo = (f) => { const n = f(lista[lista.length - 1]); if (n && n !== lista[lista.length - 1]) lista.push(n); };
   passo((s) => s.replace(/^(openrouter|nvidia|opencode)\//, '').replace(/^(anthropic|google|openai)\//, ''));
@@ -72,7 +72,7 @@ function variantes(modelo) {
 }
 
 const ehGratuito = (tabela, modelo) => {
-  const m = String(modelo ?? '').trim().toLowerCase();
+  const m = String(modelo ?? '').trim().toLowerCase().replace(/^(claude|agy|opencode):/, '');
   return (Array.isArray(tabela?.gratuitos) ? tabela.gratuitos : []).some((g) => typeof g === 'string' && globParaRegex(g).test(m));
 };
 
@@ -111,6 +111,21 @@ export function precoDe(tabela, modelo) {
   return null;
 }
 
+export function razaoPrecoSaidaEntrada(tabela, modelo) {
+  const p = precoDe(tabela, modelo);
+  if (!p) return null;
+  const div = (num) => (p.entrada > 0 ? num / p.entrada : 0);
+  return {
+    entrada: p.entrada,
+    saida: p.saida,
+    cacheLido: p.cacheLido,
+    cacheGravado: p.cacheGravado,
+    razaoSaida: div(p.saida),
+    razaoCacheLido: div(p.cacheLido),
+    razaoCacheGravado: div(p.cacheGravado),
+  };
+}
+
 // ---------------------------------------------------------------------------------------------
 // Custo
 // ---------------------------------------------------------------------------------------------
@@ -118,17 +133,34 @@ const tok = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0
 
 // item: {provedor, modelo, entrada, saida, cacheLido, cacheGravado, custoCliUsd, cacheGravado1h?}.
 // cacheGravado1h (opcional) é a parte de cacheGravado gravada com validade de 1 hora; o Claude Code grava assim e cobra mais.
+// Gratuito com preço cadastrado (opencode/glm-5.3-flash-free -> glm-5.3-flash): devolve o preço de API equivalente.
+function precoEquivalente(tabela, modelo) {
+  if (!ehGratuito(tabela, modelo)) return null;
+  const modelos = objeto(tabela?.modelos) || {};
+  const aliases = objeto(tabela?.aliases) || {};
+  for (const v of variantes(modelo)) {
+    const base = v.replace(/-free$/, '');
+    if (base === v) continue;
+    const chave = hasOwn(modelos, base) ? base : hasOwn(aliases, base) && hasOwn(modelos, aliases[base]) ? aliases[base] : null;
+    if (!chave) continue;
+    const p = precoDe({ ...tabela, gratuitos: [] }, chave);
+    if (p) return p;
+  }
+  return null;
+}
+
 export function custoUsd(tabela, item) {
   const it = objeto(item) || {};
-  if (typeof it.custoCliUsd === 'number' && Number.isFinite(it.custoCliUsd) && it.custoCliUsd >= 0) return { usd: it.custoCliUsd, origem: 'cli' };
-  const p = precoDe(tabela, it.modelo);
+  const eq = precoEquivalente(tabela, it.modelo); // gratuito com preço: ignora o cost 0 da CLI e estima o equivalente de API
+  if (!eq && typeof it.custoCliUsd === 'number' && Number.isFinite(it.custoCliUsd) && it.custoCliUsd >= 0) return { usd: it.custoCliUsd, origem: 'cli' };
+  const p = eq || precoDe(tabela, it.modelo);
   if (!p) return { usd: null, origem: 'desconhecido' };
   if (p.gratuito) return { usd: 0, origem: 'gratuito' };
   const gravado = tok(it.cacheGravado);
   const g1h = Math.min(tok(it.cacheGravado1h), gravado);
   const usd = (tok(it.entrada) * p.entrada + tok(it.saida) * p.saida + tok(it.cacheLido) * p.cacheLido
     + (gravado - g1h) * p.cacheGravado + g1h * p.cacheGravado1h) / 1e6;
-  return { usd, origem: p.aproximado ? 'aproximado' : 'tabela' };
+  return { usd, origem: eq ? 'equivalente-api' : p.aproximado ? 'aproximado' : 'tabela' };
 }
 
 export const assinaturaDe = (provedor) => (provedor === 'claude' ? 'Claude Code' : provedor === 'agy' ? 'Antigravity' : null);

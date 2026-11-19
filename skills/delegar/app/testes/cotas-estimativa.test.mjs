@@ -8,6 +8,9 @@ import {
   lerHistoricoCotas,
   coletarTentativasUso,
   estimarTokensPorCota,
+  analisarTrabalhosComParalelos,
+  normalizarSubmodelo,
+  pesosDePrecoDoModelo,
   lerLogsClaudeCode,
   lerLogsAntigravityBrain,
   fmtMil,
@@ -328,4 +331,158 @@ test('coletarTentativasUso extrai tarefas e tentativas do projeto', () => {
   assert.equal(lista[0].modelo, 'claude:sonnet');
   assert.equal(lista[0].grupo, 'claude');
   assert.equal(lista[0].entrada, 5000);
+});
+
+test('input_tokens minúsculo com cache lido alto não distorce entradaPorPct para 8 tokens', () => {
+  const t1 = '2026-11-16T10:00:00.000Z';
+  const t2 = '2026-11-16T11:00:00.000Z';
+  const resets = '2026-11-16T15:00:00.000Z';
+
+  const historico = [
+    { time: t1, claude: { read: true, fiveHourRemaining: 0.90, fiveHourResets: resets } },
+    { time: t2, claude: { read: true, fiveHourRemaining: 0.80, fiveHourResets: resets } },
+  ];
+
+  const tentativas = [
+    {
+      grupo: 'claude',
+      modelo: 'claude:claude-sonnet-5-5',
+      inicioMs: Date.parse('2026-11-16T10:10:00.000Z'),
+      fimMs: Date.parse('2026-11-16T10:50:00.000Z'),
+      entrada: 80,
+      saida: 20000,
+      cacheLido: 300000,
+      cacheGravado: 0,
+    },
+  ];
+
+  const est = estimarTokensPorCota(historico, tentativas, { tentativasApenas: true })['claude-5h'];
+  assert.equal(est.disponivel, true);
+  assert.equal(est.saidaPorPct, 2000);
+  assert.equal(est.entradaPorPct > est.saidaPorPct, true, 'entradaPorPct deve ser maior que saidaPorPct');
+  assert.equal(est.entradaPorPct >= 10000, true, 'entradaPorPct deve refletir peso ~5x-10x da saída + cache');
+  assert.equal(est.usdPorPct > 0, true);
+  assert.equal(est.entradaEquivalentePorPct > est.saidaEquivalentePorPct, true);
+});
+
+test('trabalhos paralelos na mesma janela são somados e rateados proporcionalmente', () => {
+  const t1 = '2026-11-16T10:00:00.000Z';
+  const t2 = '2026-11-16T11:00:00.000Z';
+  const resets = '2026-11-16T15:00:00.000Z';
+
+  const historico = [
+    { time: t1, claude: { read: true, fiveHourRemaining: 0.80, fiveHourResets: resets } },
+    { time: t2, claude: { read: true, fiveHourRemaining: 0.60, fiveHourResets: resets } },
+  ];
+
+  const tentativas = [
+    {
+      grupo: 'claude',
+      modelo: 'claude:sonnet',
+      inicioMs: Date.parse('2026-11-16T10:05:00.000Z'),
+      fimMs: Date.parse('2026-11-16T10:45:00.000Z'),
+      entrada: 400000,
+      saida: 40000,
+      cacheLido: 0,
+      cacheGravado: 0,
+    },
+    {
+      grupo: 'claude',
+      modelo: 'claude:sonnet',
+      inicioMs: Date.parse('2026-11-16T10:10:00.000Z'),
+      fimMs: Date.parse('2026-11-16T10:50:00.000Z'),
+      entrada: 400000,
+      saida: 40000,
+      cacheLido: 0,
+      cacheGravado: 0,
+    },
+  ];
+
+  const pontos = [
+    { tMs: Date.parse(t1), restante: 0.80, renovaMs: Date.parse(resets) },
+    { tMs: Date.parse(t2), restante: 0.60, renovaMs: Date.parse(resets) },
+  ];
+  const analise = analisarTrabalhosComParalelos(pontos, tentativas, null, { grupo: 'claude' });
+  assert.equal(analise.trabalhosAnalisados, 2);
+  assert.equal(analise.paralelosDetectados, 2);
+  assert.equal(Math.round(analise.amostrasTrabalhos[0].deltaPct), 10);
+  assert.equal(Math.round(analise.amostrasTrabalhos[1].deltaPct), 10);
+
+  const est = estimarTokensPorCota(historico, tentativas, { tentativasApenas: true })['claude-5h'];
+  assert.equal(est.disponivel, true);
+  assert.equal(est.trabalhosAnalisados, 2);
+  assert.equal(est.paralelosDetectados, 2);
+  assert.equal(est.entradaPorPct, 40000);
+  assert.equal(est.saidaPorPct, 4000);
+});
+
+test('detalhamento por submodelo unifica chaves canônicas sem duplicatas', () => {
+  assert.equal(normalizarSubmodelo('claude:claude-sonnet-5-5', 'claude'), 'claude:sonnet');
+  assert.equal(normalizarSubmodelo('claude:sonnet@high', 'claude'), 'claude:sonnet');
+  assert.equal(normalizarSubmodelo('agy:gemini-3.8-flash-high', 'gemini'), 'agy:gemini-3.8-flash');
+  assert.equal(normalizarSubmodelo('agy:gemini-4-argon-low', 'argon'), 'agy:gemini-4-argon');
+
+  const t1 = '2026-11-16T10:00:00.000Z';
+  const t2 = '2026-11-16T11:00:00.000Z';
+  const resets = '2026-11-16T15:00:00.000Z';
+
+  const historico = [
+    {
+      time: t1,
+      claude: { read: true, fiveHourRemaining: 0.90, fiveHourResets: resets },
+      gemini: { read: true, fiveHourRemaining: 0.90, fiveHourResets: resets },
+    },
+    {
+      time: t2,
+      claude: { read: true, fiveHourRemaining: 0.80, fiveHourResets: resets },
+      gemini: { read: true, fiveHourRemaining: 0.80, fiveHourResets: resets },
+    },
+  ];
+
+  const tentativas = [
+    {
+      grupo: 'claude',
+      modelo: 'claude:claude-sonnet-5-5',
+      inicioMs: Date.parse('2026-11-16T10:10:00.000Z'),
+      fimMs: Date.parse('2026-11-16T10:30:00.000Z'),
+      entrada: 200000,
+      saida: 25000,
+      cacheLido: 0,
+      cacheGravado: 0,
+    },
+    {
+      grupo: 'claude',
+      modelo: 'claude:sonnet@high',
+      inicioMs: Date.parse('2026-11-16T10:35:00.000Z'),
+      fimMs: Date.parse('2026-11-16T10:50:00.000Z'),
+      entrada: 200000,
+      saida: 25000,
+      cacheLido: 0,
+      cacheGravado: 0,
+    },
+    {
+      grupo: 'gemini',
+      modelo: 'agy:gemini-3.8-flash-high',
+      inicioMs: Date.parse('2026-11-16T10:15:00.000Z'),
+      fimMs: Date.parse('2026-11-16T10:45:00.000Z'),
+      entrada: 500000,
+      saida: 50000,
+      cacheLido: 0,
+      cacheGravado: 0,
+    },
+  ];
+
+  const res = estimarTokensPorCota(historico, tentativas, { tentativasApenas: true });
+  const claude = res['claude-5h'];
+  assert.equal(Boolean(claude.porModelo['claude:sonnet']), true);
+  assert.equal(Boolean(claude.porModelo['claude:haiku']), true);
+  assert.equal(Boolean(claude.porModelo['claude:opus']), true);
+  assert.equal(claude.porModelo['claude:claude-sonnet-5-5'], undefined);
+  assert.equal(claude.porModelo['claude:sonnet@high'], undefined);
+  assert.equal(Array.isArray(claude.submodelos), true);
+
+  const gemini = res['gemini-5h'];
+  assert.equal(Boolean(gemini.porModelo['agy:gemini-3.8-flash']), true);
+  assert.equal(Boolean(gemini.porModelo['agy:gemini-4-hydrogen']), true);
+  assert.equal(gemini.porModelo['agy:gemini-3.8-flash-high'], undefined);
 });

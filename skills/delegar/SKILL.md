@@ -296,6 +296,21 @@ O Delegar registra o consumo de tokens e calcula o custo financeiro aproximado d
   - APIs HTTP: `GET /api/uso`, `GET /api/projetos/:id/uso`, `GET /api/precos` e `POST /api/precos/atualizar`.
 - **Aviso sobre assinaturas:** Claude Code e Antigravity operam sob plano de assinatura. Os valores exibidos em US$ e R$ representam o equivalente teórico em consumo de API comercial, não uma cobrança financeira adicional na fatura.
 
+## Estimativa de tokens, custo e tempo
+
+- A estimativa usa o histórico real das tarefas já executadas (`logs/<tarefa>/result.json` de todos os projetos, inclusive rodadas arquivadas), com cache de 60 s.
+- Os similares são escolhidos nesta ordem: categoria+modelo, depois categoria+família do provedor, categoria e nível.
+- A amostra usa a mediana escalada pelo tamanho do prompt e pelo esforço; a saída traz a faixa p25 a p75 e o número de amostras.
+- Sem similares, vale um baseline calibrado em 18/11/2026.
+- O modelo assumido é o que deve rodar de fato: pula os provedores sem cota pela mesma regra do `SemCota` do worker e considera velocidade e esforço.
+- Sem amostras do modelo, usa as da família e marca o resultado como "aproximado".
+- O tempo do plano simula dependências, paralelismo e o intervalo de 60 s entre disparos.
+- A linha `Estimativa: ...` sai sozinha na mensagem `Plano recebido`.
+- A estimativa é recalculada quando o usuário muda o modo, a velocidade, o perfil ou os níveis.
+- No modo `--auto`, a estimativa também vai na mensagem `Execução iniciada`.
+- Depois da execução, o painel e o `cli.mjs ver` mostram estimado x real.
+- Cada tarefa grava uma linha com o erro relativo em `%USERPROFILE%\.delegar\state\estimativas.jsonl`.
+
 ## Paralelismo
 
 Rode tarefas em simultâneo só quando as três condições valem:
@@ -322,3 +337,11 @@ Cuidados:
 ## Relato final ao usuário
 
 Lista curta: o que cada modelo fez, lotes concluídos com commit e deploy, falhas e como foram resolvidas, trocas de modelo por cota, o que ficou pendente.
+
+
+## Agendamento, Estimativa de Cotas por Preço, Submodelos e Ajuste de Demanda
+
+- **Agendamento (`agendamento.mjs`):** `POST /api/projetos` aceita `planejarEm`, `executarEm` e `executarAposPlanejar`; `POST /api/projetos/:id/agendar` (e `ajustes.agendamento`) agenda ou cancela execução/planejamento (bloqueado com 409 se `executando`). A execução agendada também vale para projetos com plano cancelados, incompletos, interrompidos ou concluídos, disparando uma rodada nova como no botão "Executar o plano de novo". Salvar um agendamento que não poderá rodar devolve 400. Se houver bloqueio na hora do disparo, o servidor registra a mensagem "Horário agendado atingido, mas a execução não pôde começar" e marca `execucaoFalhouEm` com o `motivo`. Na CLI: `novo --agendar-planejamento` / `--agendar-execucao` e `node cli.mjs agendar <id> [--execucao ...] [--planejamento ...] [--cancelar]`. No painel: seletores `datetime-local` em Novo Projeto e no cartão do projeto.
+- **Estimativa de cota por preço de API e paralelos (`cotas-estimativa.mjs`):** cálculo de 1% da cota ponderado pelo preço de API (`precos.mjs`) e soma real de trabalhos paralelos, com detalhamento por submodelo (`porModelo` / `submodelos`) na CLI (`formatarCotas`) e no painel (`<details class="cota-submodelos">`).
+- **Consolidação de modelos (`uso.mjs`):** `consolidarListaModelos(modelos, { removerZerados: true })` em `/api/uso` unifica apelidos e nomes canônicos e remove linhas com 0 tokens.
+- **Demanda estimada e política de cota (`demanda-ajuste.mjs`):** `publicView` expõe `demanda` quando há plano; `POST /api/projetos/:id/aplicar-ajuste-cota` (e CLI `node cli.mjs demanda <id> [--aplicar auto|economizar|usar_melhor|ignorar]`, além dos botões no painel) aplica recomendações baseadas na cota semanal restante e dias até o reset.

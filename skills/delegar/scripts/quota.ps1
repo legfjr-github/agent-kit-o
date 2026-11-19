@@ -191,7 +191,7 @@ if ($hasClaude -and -not $SkipClaudeProbe) {
     $claude.sevenDayResets = $epoch.Invoke([long]$ev.seven_day.resetsAt).LocalDateTime.ToString('s')
     $h5 = ([datetime]$claude.fiveHourResets - $now).TotalHours
     if ($claude.fiveHour -ge 0.9 -or $claude.sevenDay -ge 0.95) { $claude.maxParallel = 0 }
-    elseif (($claude.fiveHour -lt 0.5 -and $claude.sevenDay -lt 0.7) -or ($h5 -lt 1 -and $claude.fiveHour -lt 0.8)) { $claude.maxParallel = 2 }
+    elseif (($claude.fiveHour -lt 0.5 -and $claude.sevenDay -lt 0.85) -or ($h5 -lt 1 -and $claude.fiveHour -lt 0.8)) { $claude.maxParallel = 2 }
     else { $claude.maxParallel = 1 }
   }
 }
@@ -300,14 +300,21 @@ if (Test-Path $manual) {
 # Real reading wins over manual and ledger.
 if ($gemini.read) {
   $gemini.source = 'agy'
-  $usedAll = @($parsed | Where-Object { $_.group -eq 'gemini' } | ForEach-Object { 1 - $_.remaining })
-  $maxUsed = ($usedAll | Measure-Object -Maximum).Maximum
   $hrs5 = if ($gemini.fiveHourResets) { ([datetime]$gemini.fiveHourResets - $now).TotalHours } else { 999 }
-  # Plenty of quota left allows several agents at once (independent batches finish sooner).
+  $used5 = if ($null -ne $gemini.fiveHourRemaining) { 1 - [double]$gemini.fiveHourRemaining } else { 0 }
+  $weeklyRem = if ($null -ne $gemini.sevenDayRemaining) { [double]$gemini.sevenDayRemaining } else { 1 }
+  # 5 h window decides how many agents fit now (independent batches finish sooner).
+  if ($used5 -lt 0.5 -or ($hrs5 -lt 1 -and $used5 -lt 0.8)) { $by5 = 6 }
+  elseif ($used5 -lt 0.75 -or ($hrs5 -lt 2 -and $used5 -lt 0.9)) { $by5 = 3 }
+  else { $by5 = 1 }
+  # Weekly quota only caps that number, in steps, instead of dropping straight to 1.
+  if ($weeklyRem -le 0.05) { $byWeek = 0 }
+  elseif ($weeklyRem -le 0.10) { $byWeek = 1 }
+  elseif ($weeklyRem -le 0.15) { $byWeek = 2 }
+  elseif ($weeklyRem -le 0.25) { $byWeek = 3 }
+  else { $byWeek = 6 }
   if ($gemini.exhausted) { $gemini.maxParallel = 0 }
-  elseif ($maxUsed -lt 0.5 -or ($hrs5 -lt 1 -and $maxUsed -lt 0.8)) { $gemini.maxParallel = 6 }
-  elseif ($maxUsed -lt 0.75 -or ($hrs5 -lt 2 -and $maxUsed -lt 0.9)) { $gemini.maxParallel = 3 }
-  else { $gemini.maxParallel = 1 }
+  else { $gemini.maxParallel = [Math]::Min($by5, $byWeek) }
 }
 if (-not $hasAgy) { $gemini.source = 'not installed'; $gemini.maxParallel = 0 }
 
@@ -315,7 +322,7 @@ $acgBonus = 0
 if ((-not $acg.exhausted) -and ($acg.read -or $null -ne $acg.fiveHourRemaining -or $null -ne $acg.sevenDayRemaining) -and ($null -eq $acg.fiveHourRemaining -or $acg.fiveHourRemaining -gt 0.2) -and ($null -eq $acg.sevenDayRemaining -or $acg.sevenDayRemaining -gt 0.2)) {
   $acgBonus = 1
 }
-$total = [Math]::Min(6, $gemini.maxParallel + $claude.maxParallel + $acgBonus)
+$total = [Math]::Min(8, $gemini.maxParallel + $claude.maxParallel + $acgBonus)
 # PC with only the free models (opencode): they are the normal chain there, not a "desperate" fallback.
 if (-not $hasClaude -and -not $hasAgy -and $hasOpencode) { $total = 2 }
 $leitura = [pscustomobject]@{

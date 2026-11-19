@@ -18,7 +18,6 @@
 
 ## 🕹️ Automações
 - [[automacoes/00_MAPA_DE_SITES]]: índice dos sites automatizados; cada um tem um mapa com entrada, telas, fluxos passo a passo, seletores e armadilhas (modelo em [[automacoes/sites/_modelo_site]]).
-- [[automacoes/sites/tecconcursos.com.br]]: mapa da API interna e automação do TEC Concursos (pastas, filtros, contagem, cadernos, guias por edital, impressão em PDF e extração de questões).
 
 ## 📁 Projetos
 - [[projetos/exemplo_projeto]]: modelo de nota de projeto (copie e renomeie).

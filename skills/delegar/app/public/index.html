@@ -68,6 +68,11 @@
       <div id="nFluxo" class="fluxo hidden"></div>
       <label>Pedido <textarea id="nPedido" rows="7" placeholder="Descreva o trabalho: objetivo, escopo, o que já existe, o que publicar no fim."></textarea></label>
       <label class="check"><input type="checkbox" id="nAuto"> Confiar no orquestrador: planejar e iniciar sem aprovação</label>
+      <div class="grid2 agendamento-grid">
+        <label>Agendar planejamento para (opcional) <input type="datetime-local" id="nAgPlan"></label>
+        <label>Agendar execução para (opcional) <input type="datetime-local" id="nAgExec"></label>
+      </div>
+      <p class="hint">Se agendar só a execução, planeja agora e executa no horário. Se agendar o planejamento, planeja (e executa, se automático) no horário.</p>
       <div class="row"><button id="nCriar" class="primary">Criar e enviar ao planejador</button><button id="nCancelar">Cancelar</button></div>
       <p id="nErro" class="erro"></p>
     </section>
@@ -144,6 +149,11 @@
         <div id="pUsoTarefas"></div>
       </section>
 
+      <section id="pEstimadoRealBox" class="card uso-secao hidden">
+        <h3>Estimado x real</h3>
+        <div id="pEstimadoRealTabela" class="uso-rolagem"></div>
+      </section>
+
       <div id="pGates" class="hidden"></div>
 
       <div id="pEditorBox" class="card hidden">
@@ -171,11 +181,36 @@
 
         <div class="card plano">
           <h3>Plano e divisão</h3>
+          <div id="pAgBox" class="agendamento-box">
+            <div class="row">
+              <span id="pAgTexto" class="hint">Sem agendamento ativo.</span>
+              <input type="datetime-local" id="pAgExec" aria-label="Agendar execução">
+              <input type="datetime-local" id="pAgPlan" aria-label="Agendar planejamento">
+              <button type="button" id="pAgBtn">Agendar</button>
+              <button type="button" id="pAgCancelar" class="hidden">Cancelar agendamento</button>
+            </div>
+          </div>
           <div id="pFluxoRow" class="row"><button type="button" id="pFluxoBtn" aria-expanded="false" aria-controls="pFluxo">Ver fluxo</button></div>
           <div id="pFluxo" class="fluxo hidden"></div>
           <p id="planoResumo" class="hint">Ainda sem plano.</p>
+          <p id="planoTempoEstimado" class="hint hidden"></p>
+          <div id="pDemandaBox" class="demanda-box hidden">
+            <div id="pDemandaResumo" class="demanda-resumo"></div>
+            <div id="pDemandaTokens" class="demanda-tokens hint"></div>
+            <div id="pDemandaMotivo" class="hint"></div>
+            <div class="row demanda-acoes">
+              <button type="button" id="pDemAuto" class="primary" title="Troca modelos só se a cota pedir: economiza quando a cota semanal está apertada, usa modelos mais fortes quando sobra cota perto da renovação. Mostra antes o que muda.">Ver ajuste recomendado</button>
+              <button type="button" id="pDemEcon" title="Põe cada tarefa no modelo mais barato que ainda dá conta (por exemplo Opus → Sonnet ou Gemini Flash, Sonnet → Haiku nas leves) e baixa o esforço alto. Mostra antes o que muda.">Ver: economizar ao máximo</button>
+              <button type="button" id="pDemMelhor" title="Põe integração e tarefas pesadas no modelo mais forte disponível (Opus ou Gemini Argon) e as de volume em Sonnet ou Hydrogen. Mostra antes o que muda.">Ver: melhores modelos</button>
+              <button type="button" id="pDemPers" title="Escolha você o modelo de cada tarefa; a estimativa de tempo, tokens, custo e cota é refeita a cada troca antes de aplicar.">Personalizar</button>
+              <button type="button" id="pDemIgnorar" title="Mantém os modelos que o planejador escolheu. Se um ajuste já foi aplicado, volta ao plano de antes dele.">Manter originais</button>
+            </div>
+            <p class="hint">Nada muda ao clicar: primeiro aparece a comparação. Depois de aplicar, "Manter originais" desfaz.</p>
+            <div id="pDemAplicado" class="hint hidden"></div>
+            <div id="pDemPrevia" class="demanda-previa hidden"></div>
+          </div>
           <div id="divisao" class="divisao"></div>
-          <div class="tabwrap"><table id="tarefas"><thead><tr><th>Tarefa</th><th>Tipo</th><th>Nível</th><th>Modelos</th><th>Depende</th><th>Estado</th></tr></thead><tbody></tbody></table></div>
+          <div class="tabwrap"><table id="tarefas"><thead><tr><th>Tarefa</th><th>Tipo</th><th>Nível</th><th>Modelos</th><th>Estimativa</th><th>Depende</th><th>Estado</th></tr></thead><tbody></tbody></table></div>
           <p id="verify" class="hint"></p>
           <details><summary>Log do pipeline</summary><pre id="log" class="log"></pre></details>
           <p class="hint">Relatório no cofre: <span id="relatorio" class="mono"></span></p>

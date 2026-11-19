@@ -17,7 +17,7 @@ const ESTADOS = { planejando: 'planejando', conversando: 'conversando', plano_pr
 const TAREFA = { pending: 'na fila', waiting: 'aguardando confirmação', running: 'rodando', done: 'concluída', failed: 'falhou', skipped: 'pulada' };
 const PAPEIS = [['planner', 'Planejador'], ['pesado', 'Nível pesado'], ['volume', 'Nível volume'], ['leve', 'Nível leve'], ['fix', 'Correção'], ['coord', 'Coordenador de falhas']];
 const ESFORCOS = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
-const VEL_PADRAO = { auto: 'Automático: esforço sugerido pelo planejador por tarefa; integração e verificação em médio (ou alto no modo agressivo).', rapido: 'Rápido: executores em esforço baixo (low); integração e verificação em médio (medium).', medio: 'Médio: executores, integração e verificação em esforço médio (medium).', demorado: 'Demorado: executores, integração e verificação em esforço alto (high).' };
+const VEL_PADRAO = { auto: 'Automático: esforço sugerido pelo planejador por tarefa; integração e verificação em médio (ou alto no modo agressivo). Modelos na ordem padrão do modo.', rapido: 'Rápido: na frente os modelos mais rápidos com nota aceitável no benchmark (Gemini Hydrogen, Opus, Sonnet), executores em esforço baixo (low); integração e verificação em médio.', medio: 'Médio: ordem padrão do modo, que mistura provedores para poupar tokens e cota; executores, integração e verificação em esforço médio (medium).', demorado: 'Demorado: na frente os de melhor resultado no benchmark, mesmo mais lentos (Opus, Gemini Neon, Haiku), em esforço alto (high).' };
 let MODES = {}, SUP = {}, VEL = { ...VEL_PADRAO }, CAT = { modelos: [], provedores: {} }, ULTIMO = null, PADRAO_CUSTOM = null;
 let atual = null, ultimoMsgs = -1, timer = null, vista = 'vazio', projAtual = null;
 const promptsAbertos = new Set();   // prompts de tarefa abertos: a tabela é refeita a cada 4 s e não pode fechá-los
@@ -28,11 +28,13 @@ let PERFIS = null, PERFIS_AVISO = null, novoPerfil = null, msgModelos = '';   //
 
 const flat = (t) => (Array.isArray(t?.[0]) ? t[0] : t || []);
 const copia = (o) => JSON.parse(JSON.stringify(o));
-function cfgDeModo(k) {
+// Os modos prontos têm uma ordem de modelos por velocidade (benchmark de 19/11/2026); o editor mostra a da velocidade escolhida.
+function cfgDeModo(k, vel = document.getElementById('nVel')?.value) {
   const m = MODES[k];
   if (!m) return copia(ULTIMO || PADRAO_CUSTOM);
+  const t = m.porVelocidade?.[vel] ? { ...m.tiers, ...m.porVelocidade[vel] } : m.tiers;
   return { base: k, planner: [...m.planner], fix: [...m.fix], coord: [...m.coord], maxConcurrent: m.maxConcurrent,
-    tiers: { pesado: [...flat(m.tiers.pesado)], volume: [...flat(m.tiers.volume)], leve: [...flat(m.tiers.leve)] } };
+    tiers: { pesado: [...flat(t.pesado)], volume: [...flat(t.volume)], leve: [...flat(t.leve)] } };
 }
 const lista = (cfg, k) => (['planner', 'fix', 'coord'].includes(k) ? cfg[k] : cfg.tiers[k]);
 function nomeModelo(id) {
@@ -222,7 +224,7 @@ async function carregarLista() {
   const g = { aguardando: [], rodando: [], conversa: [], concluidos: [], arquivados: [] };
   for (const p of ps) {
     if (p.arquivado) g.arquivados.push(p);
-    else if (p.gates > 0 || p.estado === 'plano_pronto' || ['interrompido', 'incompleto'].includes(p.estado)) g.aguardando.push(p);
+    else if (p.gates > 0 || p.estado === 'plano_pronto' || p.estado === 'agendado' || p.agendamento?.ativo || ['interrompido', 'incompleto'].includes(p.estado)) g.aguardando.push(p);
     else if (p.estado === 'executando' || p.ocupado) g.rodando.push(p);
     else if (['concluido', 'cancelado'].includes(p.estado)) g.concluidos.push(p);
     else g.conversa.push(p); // planejando/conversando, e qualquer estado novo que não esteja listado aqui
@@ -259,13 +261,109 @@ function renderMsgs(p) {
   ultimoMsgs = p.mensagens.length;
 }
 
+function renderAgendamentoEDemanda(p) {
+  const agBox = $('pAgBox');
+  if (agBox) {
+    const temFalha = !!p.agendamento?.execucaoFalhouEm;
+    const ativo = !!p.agendamento?.ativo;
+    const mostrar = ativo || temFalha;
+    const txtEl = $('pAgTexto');
+    txtEl.textContent = (mostrar && p.agendamento?.texto) ? p.agendamento.texto : 'Sem agendamento ativo.';
+    txtEl.className = temFalha ? 'agendamento-falhou' : 'hint';
+    $('pAgCancelar').classList.toggle('hidden', !mostrar);
+    const desab = p.estado === 'executando';
+    $('pAgBtn').disabled = desab;
+    $('pAgCancelar').disabled = desab;
+  }
+  const demBox = $('pDemandaBox');
+  if (demBox) {
+    if (!p.plano || !p.demanda) {
+      demBox.classList.add('hidden');
+    } else {
+      demBox.classList.remove('hidden');
+      const tot = p.demanda.total || p.demanda.totais || p.demanda;
+      const tempo = p.demanda.tempo;
+
+      // 1. Linha resumo: usar pronta se houver; senão montar a partir de total e tempo
+      let linha = p.demanda.linhaResumo;
+      if (!linha) {
+        const partes = [];
+        if (tempo && tempo.totalSeg != null) {
+          const faixaTxt = Array.isArray(tempo.faixaSeg) && tempo.faixaSeg.length >= 2
+            ? ` (entre ${formatarDuracao(tempo.faixaSeg[0])} e ${formatarDuracao(tempo.faixaSeg[1])})`
+            : '';
+          partes.push(`~${formatarDuracao(tempo.totalSeg)}${faixaTxt}`);
+        }
+        if (tot.entrada != null) {
+          partes.push(`~${fmtTokens(tot.entrada)} tokens de entrada`);
+        }
+        if (tot.usd != null) {
+          partes.push(`~US$ ${fmtUsd(tot.usd)}`);
+        }
+        linha = partes.length ? `Estimativa: ${partes.join(', ')}` : `Demanda estimada: ${fmtTokens(tot.entrada || 0)} ent / ${fmtTokens(tot.saida || 0)} sai`;
+      }
+      $('pDemandaResumo').textContent = linha;
+
+      // 2. Abaixo: entrada e saída no formato '~X (entre A e B, N amostras)'
+      const boxTokens = $('pDemandaTokens');
+      if (boxTokens) {
+        const txtEntrada = formatarFaixaAmostras(tot.entrada, tot.faixaEntrada, tot.amostras, p.demanda.tarefas, 'entrada');
+        const txtSaida = formatarFaixaAmostras(tot.saida, tot.faixaSaida, tot.amostras, p.demanda.tarefas, 'saida');
+        const partesTokens = [];
+        if (txtEntrada) partesTokens.push(`Entrada: ${txtEntrada}`);
+        if (txtSaida) partesTokens.push(`Saída: ${txtSaida}`);
+        boxTokens.textContent = partesTokens.join(' · ');
+        boxTokens.classList.toggle('hidden', !partesTokens.length);
+      }
+
+      $('pDemandaMotivo').textContent = p.demanda.recomendacao?.motivo || '';
+      const apl = $('pDemAplicado');
+      if (apl) {
+        const aj = p.ajusteCota;
+        apl.textContent = aj ? `Ajuste aplicado: ${aj.nome} em ${aj.mudancas.length} tarefa(s). "Manter originais" volta ao plano de antes.` : '';
+        apl.classList.toggle('hidden', !aj);
+      }
+      const rodando = p.estado === 'executando';
+      for (const id of ['pDemAuto', 'pDemEcon', 'pDemMelhor', 'pDemPers', 'pDemIgnorar']) if ($(id)) $(id).disabled = rodando;
+    }
+  }
+}
+
 function renderPlano(p) {
+  renderAgendamentoEDemanda(p);
   const tb = $('tarefas').tBodies[0];
   const run = p.run?.status || {};
   const editavel = p.estado !== 'executando';
-  if (!p.plano) { $('planoResumo').textContent = 'Ainda sem plano.'; tb.replaceChildren(); $('divisao').replaceChildren(); $('verify').textContent = ''; renderPlano.chave = null; return; }
-  // só refaz a tabela quando o plano ou o estado das tarefas muda (prompt aberto não fecha nem volta ao topo)
-  const chave = p.id + JSON.stringify([p.estado, p.plano.tarefas.map((t) => [t.id, t.nivel, t.cadeiaEfetiva]), run]);
+  const tempoBox = $('planoTempoEstimado');
+  if (!p.plano) {
+    $('planoResumo').textContent = 'Ainda sem plano.';
+    if (tempoBox) { tempoBox.textContent = ''; tempoBox.classList.add('hidden'); }
+    tb.replaceChildren(); $('divisao').replaceChildren(); $('verify').textContent = ''; renderPlano.chave = null; return;
+  }
+
+  // Linha com tempo estimado total e faixa
+  if (tempoBox) {
+    const tempo = p.demanda?.tempo;
+    if (tempo && tempo.totalSeg != null) {
+      const durTxt = formatarDuracao(tempo.totalSeg);
+      let faixaTxt = '';
+      if (Array.isArray(tempo.faixaSeg) && tempo.faixaSeg.length >= 2) {
+        faixaTxt = ` (entre ${formatarDuracao(tempo.faixaSeg[0])} e ${formatarDuracao(tempo.faixaSeg[1])})`;
+      }
+      tempoBox.textContent = `Tempo estimado total: ~${durTxt}${faixaTxt}`;
+      tempoBox.classList.remove('hidden');
+    } else {
+      tempoBox.textContent = '';
+      tempoBox.classList.add('hidden');
+    }
+  }
+
+  // só refaz a tabela quando o plano, demanda ou o estado das tarefas muda (prompt aberto não fecha nem volta ao topo)
+  const demandaChave = p.demanda?.tarefas?.map((t) => [
+    t.id, t.demanda, t.modeloAssumido, t.esforcoEfetivo, t.aproximado,
+    t.amostras, t.entradaEstimada, t.duracaoSegEstimada, t.pulados, t.faixa
+  ]) || null;
+  const chave = p.id + JSON.stringify([p.estado, p.plano.tarefas.map((t) => [t.id, t.nivel, t.cadeiaEfetiva]), run, demandaChave]);
   if (renderPlano.chave === chave) return;
   renderPlano.chave = chave;
   $('planoResumo').textContent = p.plano.resumo || '';
@@ -276,11 +374,52 @@ function renderPlano(p) {
     const nivel = el('select', { disabled: !editavel }, ...['pesado', 'volume', 'leve'].map((n) => el('option', { value: n, text: n, selected: n === t.nivel })));
     nivel.onchange = async () => { try { await call('POST', `/api/projetos/${p.id}/ajustes`, { niveis: { [t.id]: nivel.value } }); refresh(); } catch (e) { alert(e.message); } };
     const s = run[t.id];
+    const dt = Array.isArray(p.demanda?.tarefas) ? p.demanda.tarefas.find((x) => x.id === t.id) : null;
+
+    let tdEstimativa;
+    let puladosTxt = '';
+    if (dt) {
+      const txtEntrada = formatarFaixaTokensTarefa(dt.entradaEstimada, dt.faixa?.entrada, dt.amostras);
+      const tempoFaixa = Array.isArray(dt.faixa?.duracaoSeg) && dt.faixa.duracaoSeg.length >= 2
+        ? ` (entre ${formatarDuracao(dt.faixa.duracaoSeg[0])} e ${formatarDuracao(dt.faixa.duracaoSeg[1])})`
+        : '';
+      const tempoTxt = dt.duracaoSegEstimada != null ? `~${formatarDuracao(dt.duracaoSegEstimada)}` : '-';
+      puladosTxt = Array.isArray(dt.pulados) && dt.pulados.length
+        ? dt.pulados.map((x) => `pulou ${x.modelo}: ${x.motivo}`).join('\n')
+        : '';
+
+      const dicaPartes = [];
+      if (dt.modeloAssumido) dicaPartes.push(`Modelo assumido: ${dt.modeloAssumido}`);
+      if (dt.esforcoEfetivo) dicaPartes.push(`Esforço efetivo: ${dt.esforcoEfetivo}`);
+      if (dt.demanda) dicaPartes.push(`Categoria de demanda: ${dt.demanda}`);
+      if (dt.entradaEstimada != null) dicaPartes.push(`Tokens de entrada: ${txtEntrada}`);
+      if (dt.duracaoSegEstimada != null) dicaPartes.push(`Tempo: ${tempoTxt}${tempoFaixa}`);
+      if (dt.aproximado) dicaPartes.push('Estimativa aproximada');
+      if (puladosTxt) dicaPartes.push(puladosTxt);
+
+      const celulaKids = [];
+      const partesVisual = [];
+      if (dt.duracaoSegEstimada != null) partesVisual.push(tempoTxt);
+      if (dt.entradaEstimada != null) partesVisual.push(`~${fmtTokens(dt.entradaEstimada)} ent`);
+      if (dt.demanda) partesVisual.push(`[${dt.demanda}]`);
+      celulaKids.push(el('span', { text: partesVisual.join(' · ') || '-' }));
+      if (dt.aproximado) {
+        celulaKids.push(' ', el('span', { class: 'uso-origem aproximado', text: 'aproximado' }));
+      }
+      tdEstimativa = el('td', { class: 'estimativa-col', title: dicaPartes.join('\n') }, el('div', { class: 'demanda-celula' }, ...celulaKids));
+    } else {
+      tdEstimativa = el('td', { class: 'hint', text: '-' });
+    }
+
+    const tdModelos = el('td', { class: 'chain', text: t.cadeiaEfetiva.join(' → ') });
+    if (puladosTxt) tdModelos.title = puladosTxt;
+
     return el('tr', {},
       el('td', {}, el('details', { open: promptsAbertos.has(p.id + '/' + t.id), ontoggle: (e) => { const k = p.id + '/' + t.id; if (e.target.open) promptsAbertos.add(k); else promptsAbertos.delete(k); } }, el('summary', { text: `${t.id}: ${t.titulo || ''}${t.confirmar ? ' ⚑' : ''}` }),
         t.confirmar ? el('p', { class: 'hint', text: 'Pede confirmação no modo acompanhado' + (t.motivo ? ': ' + t.motivo : '') }) : null, el('pre', { text: t.prompt }))),
       el('td', { text: t.tipo }), el('td', {}, nivel),
-      el('td', { class: 'chain', text: t.cadeiaEfetiva.join(' → ') }),
+      tdModelos,
+      tdEstimativa,
       el('td', { text: t.depende.join(', ') || '-' }),
       el('td', {}, s ? el('span', { class: 'badge ' + s.state, text: (TAREFA[s.state] || s.state) + (s.model ? ` (${s.model})` : '') }) : el('span', { class: 'hint', text: '-' })));
   }));
@@ -418,7 +557,7 @@ function render(p) {
   $('pEnviar').disabled = $('pGerar').disabled = p.ocupado || rodando;
   renderGates(p.run?.gates || [], p.id, $('pGates'));
   const ps = $('pPerfil'); if (ps) { if (document.activeElement !== ps) ps.value = p.perfil || ''; ps.disabled = rodando; }
-  renderMsgs(p); renderPlano(p); renderRodadas(p);
+  renderMsgs(p); renderPlano(p); renderRodadas(p); renderComparacaoEstimativa(p);
   atualizarFluxo($('pFluxo'), dadosFluxoProj(p));
   $('log').textContent = p.run?.log || '';
   $('relatorio').textContent = p.relatorio || '';
@@ -482,6 +621,17 @@ function linhaCota(l, { compacta = false, aoAtualizar } = {}) {
       estSpan.title = `Faixa de confiança (${l.estimativa.confianca || 'baixa'}): entrada [${l.estimativa.faixaEntrada.join(' - ')}], saída [${l.estimativa.faixaSaida.join(' - ')}]`;
     }
     box.append(estSpan);
+    const mapaSub = l.estimativa.porModelo || (Array.isArray(l.estimativa.submodelos) ? Object.fromEntries(l.estimativa.submodelos.map((s) => [s.modelo || s.nome, s])) : null);
+    if (mapaSub && Object.keys(mapaSub).length) {
+      const det = el('details', { class: 'cota-submodelos' },
+        el('summary', { text: 'Por submodelo (equivalente em preço de API)' })
+      );
+      for (const [subNome, subInfo] of Object.entries(mapaSub)) {
+        const subTxt = typeof subInfo === 'string' ? subInfo : (subInfo?.texto || `${fmtTokens(subInfo?.entrada || 0)} ent / ${fmtTokens(subInfo?.saida || 0)} sai`);
+        det.append(el('div', { class: 'cota-submodelo-item', text: `${subNome}: ${subTxt}` }));
+      }
+      box.append(det);
+    }
   }
   if (l.atual) {
     const ms = (l.modelosAtuais || []).map((x) => `${x.modelo} (${x.tarefa})`).join(', ');
@@ -645,6 +795,79 @@ function formatarDataPrecos(iso) {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return String(iso);
   return d.toLocaleDateString('pt-BR');
+}
+
+function formatarDuracao(seg) {
+  if (seg == null || !Number.isFinite(Number(seg))) return '-';
+  const s = Math.round(Number(seg));
+  if (s < 0) return '0 s';
+  if (s < 60) return `${s} s`;
+  const totalMin = Math.round(s / 60);
+  if (totalMin < 60) return `${totalMin} min`;
+  const h = Math.floor(s / 3600);
+  const m = Math.round((s % 3600) / 60);
+  if (m === 60) return `${h + 1} h`;
+  return m > 0 ? `${h} h ${m} min` : `${h} h`;
+}
+
+function formatarErroRelPct(erroVal, estVal, realVal) {
+  let pct = null;
+  if (erroVal != null && Number.isFinite(Number(erroVal))) {
+    const num = Number(erroVal);
+    if (estVal != null && realVal != null && Number(estVal) > 0) {
+      const calcFracao = (Number(realVal) - Number(estVal)) / Number(estVal);
+      const calcPct = calcFracao * 100;
+      if (Math.abs(num - calcPct) < 0.5) pct = num;
+      else if (Math.abs(num - calcFracao) < 0.05) pct = num * 100;
+      else pct = (Math.abs(num) <= 2 && num !== 0 && !Number.isInteger(num)) ? num * 100 : num;
+    } else {
+      pct = (Math.abs(num) <= 2 && num !== 0 && !Number.isInteger(num)) ? num * 100 : num;
+    }
+  } else if (estVal != null && realVal != null && Number(estVal) > 0) {
+    pct = ((Number(realVal) - Number(estVal)) / Number(estVal)) * 100;
+  }
+  if (pct == null || !Number.isFinite(pct)) return '-';
+  const sinal = pct > 0 ? '+' : (pct < 0 ? '-' : '');
+  const abs = Math.abs(pct).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return `${sinal}${abs}%`;
+}
+
+function formatarFaixaAmostras(val, faixa, amostras, tarefas, tipo) {
+  if (val == null && !faixa && (!Array.isArray(tarefas) || !tarefas.length)) return '';
+  let fx = Array.isArray(faixa) && faixa.length >= 2 ? faixa : null;
+  if (!fx && Array.isArray(tarefas) && tarefas.length) {
+    const minSoma = tarefas.reduce((acc, t) => acc + (t.faixa?.[tipo]?.[0] != null ? t.faixa[tipo][0] : (tipo === 'entrada' ? t.entradaEstimada : t.saidaEstimada) || 0), 0);
+    const maxSoma = tarefas.reduce((acc, t) => acc + (t.faixa?.[tipo]?.[1] != null ? t.faixa[tipo][1] : (tipo === 'entrada' ? t.entradaEstimada : t.saidaEstimada) || 0), 0);
+    if (maxSoma > minSoma) fx = [minSoma, maxSoma];
+  }
+  let nAmostras = amostras != null && Number.isFinite(Number(amostras)) ? Number(amostras) : null;
+  if (nAmostras == null && Array.isArray(tarefas) && tarefas.length) {
+    const maxAm = tarefas.reduce((acc, t) => Math.max(acc, Number(t.amostras) || 0), 0);
+    if (maxAm > 0) nAmostras = maxAm;
+  }
+  const vTxt = val != null ? `~${fmtTokens(val)}` : (fx ? `~${fmtTokens(fx[0])}` : '-');
+  const partes = [];
+  if (fx) {
+    partes.push(`entre ${fmtTokens(fx[0])} e ${fmtTokens(fx[1])}`);
+  }
+  if (nAmostras != null && nAmostras > 0) {
+    partes.push(`${nAmostras.toLocaleString('pt-BR')} amostra${nAmostras === 1 ? '' : 's'}`);
+  }
+  return partes.length ? `${vTxt} (${partes.join(', ')})` : vTxt;
+}
+
+function formatarFaixaTokensTarefa(val, faixa, amostras) {
+  if (val == null && !faixa) return '-';
+  const vTxt = val != null ? `~${fmtTokens(val)}` : '-';
+  const partes = [];
+  if (Array.isArray(faixa) && faixa.length >= 2) {
+    partes.push(`entre ${fmtTokens(faixa[0])} e ${fmtTokens(faixa[1])}`);
+  }
+  if (amostras != null && Number.isFinite(Number(amostras)) && Number(amostras) > 0) {
+    const n = Number(amostras);
+    partes.push(`${n.toLocaleString('pt-BR')} amostra${n === 1 ? '' : 's'}`);
+  }
+  return partes.length ? `${vTxt} (${partes.join(', ')})` : vTxt;
 }
 
 function badgeAssinatura(ass) {
@@ -831,11 +1054,35 @@ function renderUso(d, infoPrecos) {
   if (!d) return;
   const temBrl = typeof d.usdBrl === 'number' && Number.isFinite(d.usdBrl) && d.usdBrl > 0;
   const boxTabela = $('usoTabela');
+  const partesUso = [el('h4', { class: 'uso-subtitulo', text: 'Pelo orquestrador (tarefas dos projetos)' })];
   if (!d.modelos?.length && (!d.total || (d.total.entrada === 0 && d.total.saida === 0))) {
-    boxTabela.replaceChildren(el('p', { class: 'hint', text: 'Nenhum uso registrado neste período.' }));
+    partesUso.push(el('p', { class: 'hint', text: 'Nenhum uso registrado neste período.' }));
   } else {
-    boxTabela.replaceChildren(criarTabelaUsoModelos(d.modelos, d.total, temBrl));
+    partesUso.push(criarTabelaUsoModelos(d.modelos, d.total, temBrl));
   }
+  // Fora do orquestrador: resumo diário gravado pelo servidor (refeito no máximo 1x por dia ou ao pedir).
+  const fo = d.foraOrquestrador;
+  if (fo) {
+    partesUso.push(el('h4', { class: 'uso-subtitulo', text: 'Fora do orquestrador (Claude Code e Antigravity usados à parte, subagentes, planejador)' }));
+    const quando = fo.atualizado ? new Date(fo.atualizado).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : 'nunca';
+    const exc = fo.excluidos ? ` Respostas que já contam nas tarefas e foram tiradas daqui: Claude ${fo.excluidos.claude}, Antigravity ${fo.excluidos.agy} conversas.` : '';
+    const info = el('p', { class: 'hint', text: `Leitura dos logs locais de ${quando}${fo.emAtualizacao ? ' (atualizando agora…)' : ''}; refeita no máximo 1x por dia.${exc}` });
+    const bt = el('button', { type: 'button', text: 'Atualizar agora', disabled: !!fo.emAtualizacao });
+    bt.onclick = async () => {
+      bt.disabled = true; bt.textContent = 'lendo os logs…';
+      try { await call('POST', '/api/uso/atualizar-fora'); await refreshUso(true); } catch (e) { alert(e.message); bt.disabled = false; bt.textContent = 'Atualizar agora'; }
+    };
+    info.append(' ', bt);
+    partesUso.push(info);
+    if (fo.modelos?.length) partesUso.push(criarTabelaUsoModelos(fo.modelos, fo.total, temBrl));
+    else partesUso.push(el('p', { class: 'hint', text: fo.atualizado ? 'Nenhum uso fora do orquestrador neste período.' : 'Ainda sem leitura; clique em Atualizar agora.' }));
+    if (d.totalGeral) {
+      const tg = d.totalGeral;
+      const txt = `Total geral no período: saída ${fmtTokens(tg.saida)}, cache lido ${fmtTokens(tg.cacheLido)}, cache gravado ${fmtTokens(tg.cacheGravado)}, entrada ${fmtTokens(tg.entrada)}${tg.usd != null ? `, ~US$ ${fmtUsd(tg.usd)}` : ''}${temBrl && tg.brl != null ? ` (~R$ ${fmtUsd(tg.brl)})` : ''}.`;
+      partesUso.push(el('p', { class: 'uso-total-geral' }, el('strong', { text: txt })));
+    }
+  }
+  boxTabela.replaceChildren(...partesUso);
 
   // Nota fixa
   const dataPrecos = formatarDataPrecos(infoPrecos?.atualizado || d.precosAtualizados);
@@ -988,6 +1235,108 @@ function renderUsoProjeto(d) {
   } else {
     boxTarefas.replaceChildren();
   }
+
+  if (d.comparacaoEstimativa) {
+    renderComparacaoEstimativa(d);
+  }
+}
+
+function criarTabelaEstimadoReal(comp) {
+  const thead = el('thead', {},
+    el('tr', {},
+      el('th', { rowSpan: 2, text: 'Tarefa' }),
+      el('th', { colSpan: 3, class: 'num grupo-head', text: 'Entrada', title: 'Tokens novos que o modelo leu: entrada sem cache + cache gravado. O Claude grava quase todo o contexto em cache, então a "entrada" dele sozinha fica em dezenas de tokens.' }),
+      el('th', { colSpan: 3, class: 'num grupo-head', text: 'Saída' }),
+      el('th', { colSpan: 3, class: 'num grupo-head', text: 'Cache lido', title: 'Contexto relido do cache a cada passo (custa cerca de 10% da entrada).' }),
+      el('th', { colSpan: 3, class: 'num grupo-head', text: 'Tempo' })
+    ),
+    el('tr', {},
+      el('th', { class: 'num sub-head', text: 'Est.' }),
+      el('th', { class: 'num sub-head', text: 'Real' }),
+      el('th', { class: 'num sub-head', text: 'Erro' }),
+      el('th', { class: 'num sub-head', text: 'Est.' }),
+      el('th', { class: 'num sub-head', text: 'Real' }),
+      el('th', { class: 'num sub-head', text: 'Erro' }),
+      el('th', { class: 'num sub-head', text: 'Est.' }),
+      el('th', { class: 'num sub-head', text: 'Real' }),
+      el('th', { class: 'num sub-head', text: 'Erro' }),
+      el('th', { class: 'num sub-head', text: 'Est.' }),
+      el('th', { class: 'num sub-head', text: 'Real' }),
+      el('th', { class: 'num sub-head', text: 'Erro' })
+    )
+  );
+
+  const celulaTokens = (v) => el('td', { class: 'num', title: fmtExato(v) ? fmtExato(v) + ' tokens' : '' }, fmtTokens(v));
+  // Entrada nova = entrada sem cache + cache gravado; os dois juntos comparam provedores que usam cache e os que não usam.
+  const entNova = (o) => (Number(o?.entrada) || 0) + (Number(o?.cacheGravado) || 0);
+  const celulaEntrada = (o) => el('td', { class: 'num', title: `${fmtExato(Number(o?.entrada) || 0) || 0} sem cache + ${fmtExato(Number(o?.cacheGravado) || 0) || 0} gravados em cache` }, fmtTokens(entNova(o)));
+  const erroEntrada = (est, rl) => celulaErro(null, entNova(est), entNova(rl));
+  const celulaDuracao = (v) => el('td', { class: 'num' }, formatarDuracao(v));
+  const celulaErro = (erro, est, real) => {
+    const txt = formatarErroRelPct(erro, est, real);
+    const cls = txt.startsWith('+') ? 'num erro-pos' : (txt.startsWith('-') ? 'num erro-neg' : 'num');
+    return el('td', { class: cls }, txt);
+  };
+
+  const tarefas = comp.tarefas || [];
+  const rows = tarefas.map((t) => {
+    const est = t.estimado || {};
+    const rl = t.real || {};
+    const err = t.erroRel || {};
+    return el('tr', {},
+      el('td', {}, el('strong', { text: t.id })),
+      celulaEntrada(est), celulaEntrada(rl), erroEntrada(est, rl),
+      celulaTokens(est.saida), celulaTokens(rl.saida), celulaErro(err.saida, est.saida, rl.saida),
+      celulaTokens(est.cacheLido), celulaTokens(rl.cacheLido), celulaErro(err.cacheLido, est.cacheLido, rl.cacheLido),
+      celulaDuracao(est.duracaoSeg), celulaDuracao(rl.duracaoSeg), celulaErro(err.duracaoSeg, est.duracaoSeg, rl.duracaoSeg)
+    );
+  });
+
+  const tot = comp.total;
+  if (tot || tarefas.length > 1) {
+    const est = tot?.estimado || {
+      entrada: tarefas.reduce((s, t) => s + (t.estimado?.entrada || 0), 0),
+      saida: tarefas.reduce((s, t) => s + (t.estimado?.saida || 0), 0),
+      cacheLido: tarefas.reduce((s, t) => s + (t.estimado?.cacheLido || 0), 0),
+      cacheGravado: tarefas.reduce((s, t) => s + (t.estimado?.cacheGravado || 0), 0),
+      duracaoSeg: tarefas.reduce((s, t) => s + (t.estimado?.duracaoSeg || 0), 0),
+    };
+    const rl = tot?.real || {
+      entrada: tarefas.reduce((s, t) => s + (t.real?.entrada || 0), 0),
+      saida: tarefas.reduce((s, t) => s + (t.real?.saida || 0), 0),
+      cacheLido: tarefas.reduce((s, t) => s + (t.real?.cacheLido || 0), 0),
+      cacheGravado: tarefas.reduce((s, t) => s + (t.real?.cacheGravado || 0), 0),
+      duracaoSeg: tarefas.reduce((s, t) => s + (t.real?.duracaoSeg || 0), 0),
+    };
+    const err = tot?.erroRel || {};
+    // Comparações gravadas antes de 19/11/2026 só têm a soma das tarefas, que com workers simultâneos não é o tempo total.
+    const temRelogio = rl.duracaoSomadaSeg != null;
+    const celulaTempoTotal = (v, soma) => el('td', { class: 'num', title: temRelogio ? `do primeiro início ao último fim; somando as tarefas: ${formatarDuracao(soma)}` : 'soma das tarefas (comparação antiga)' }, formatarDuracao(v) + (temRelogio ? '' : ' (soma)'));
+    rows.push(el('tr', { class: 'uso-total' },
+      el('td', {}, el('strong', { text: 'Total' })),
+      celulaEntrada(est), celulaEntrada(rl), erroEntrada(est, rl),
+      celulaTokens(est.saida), celulaTokens(rl.saida), celulaErro(err.saida, est.saida, rl.saida),
+      celulaTokens(est.cacheLido), celulaTokens(rl.cacheLido), celulaErro(err.cacheLido, est.cacheLido, rl.cacheLido),
+      celulaTempoTotal(est.duracaoSeg, est.duracaoSomadaSeg), celulaTempoTotal(rl.duracaoSeg, rl.duracaoSomadaSeg), celulaErro(err.duracaoSeg, est.duracaoSeg, rl.duracaoSeg)
+    ));
+  }
+
+  const tbody = el('tbody', {}, ...rows);
+  return el('table', { class: 'uso-tabela' }, thead, tbody);
+}
+
+function renderComparacaoEstimativa(p) {
+  const box = $('pEstimadoRealBox');
+  const tabelaBox = $('pEstimadoRealTabela');
+  if (!box || !tabelaBox) return;
+  const comp = p?.comparacaoEstimativa;
+  if (!comp || !Array.isArray(comp.tarefas) || !comp.tarefas.length) {
+    box.classList.add('hidden');
+    tabelaBox.replaceChildren();
+    return;
+  }
+  box.classList.remove('hidden');
+  tabelaBox.replaceChildren(criarTabelaEstimadoReal(comp));
 }
 
 async function refreshUsoProjeto(id, forcar = false) {
@@ -1065,16 +1414,23 @@ $('nModo').onchange = () => {
   if (k === 'personalizado') $('nModelosBox').open = true;
   descNovo(); fluxoNovo();
 };
-$('nVel').onchange = descNovo;
+$('nVel').onchange = () => {
+  // Modo pronto sem edição: a cadeia mostrada acompanha a velocidade.
+  if ($('nModo').value !== 'personalizado' && !novoPerfil) { novoCfg = cfgDeModo($('nModo').value); editor($('nEditor'), novoCfg, { onChange: aoMudarNovo }); fluxoNovo(); }
+  descNovo();
+};
 $('nSup').onchange = descNovo;
 $('nCriar').onclick = async () => {
   $('nErro').textContent = ''; $('nCriar').disabled = true;
   try {
     const modo = $('nModo').value;
     const p = await call('POST', '/api/projetos', { titulo: $('nTitulo').value.trim() || undefined, repo: $('nRepo').value.trim(), modo, perfil: novoPerfil || undefined, custom: modo === 'personalizado' && !novoPerfil ? novoCfg : undefined,
-      velocidade: $('nVel').value, supervisao: $('nSup').value, auto: $('nAuto').checked, pedido: $('nPedido').value });
+      velocidade: $('nVel').value, supervisao: $('nSup').value, auto: $('nAuto').checked, pedido: $('nPedido').value,
+      planejarEm: $('nAgPlan')?.value || undefined, executarEm: $('nAgExec')?.value || undefined });
     try { localStorage.setItem('delegar.repo', $('nRepo').value.trim()); } catch {}
     $('nPedido').value = ''; $('nTitulo').value = '';
+    if ($('nAgPlan')) $('nAgPlan').value = '';
+    if ($('nAgExec')) $('nAgExec').value = '';
     abrir(p.id);
   } catch (e) { $('nErro').textContent = e.message; } finally { $('nCriar').disabled = false; }
 };
@@ -1082,6 +1438,133 @@ $('pEnviar').onclick = async () => {
   const t = $('pMsg').value.trim(); if (!t) return;
   try { await call('POST', `/api/projetos/${atual}/mensagem`, { texto: t }); $('pMsg').value = ''; refresh(); } catch (e) { alert(e.message); }
 };
+if ($('pAgBtn')) $('pAgBtn').onclick = async () => {
+  try {
+    await call('POST', `/api/projetos/${atual}/agendar`, {
+      executarEm: $('pAgExec').value || null,
+      planejarEm: $('pAgPlan').value || null,
+    });
+    refresh();
+  } catch (e) { alert(e.message); }
+};
+if ($('pAgCancelar')) $('pAgCancelar').onclick = async () => {
+  try {
+    await call('POST', `/api/projetos/${atual}/agendar`, { cancelar: true });
+    if ($('pAgExec')) $('pAgExec').value = '';
+    if ($('pAgPlan')) $('pAgPlan').value = '';
+    refresh();
+  } catch (e) { alert(e.message); }
+};
+// Ajuste por cota: o clique mostra a prévia (antes x depois); só o botão "Aplicar" da prévia muda o plano.
+const NOME_POLITICA = { auto: 'Ajuste recomendado', economizar: 'Economizar ao máximo', usar_melhor: 'Melhores modelos', personalizado: 'Personalizado', ignorar: 'Manter originais' };
+function fmtDiferenca(antes, depois, fmt) {
+  if (antes == null || depois == null) return '';
+  const d = depois - antes;
+  if (Math.abs(d) < 1e-9) return ' (igual)';
+  return ` (${d > 0 ? '+' : '−'}${fmt(Math.abs(d))})`;
+}
+function fmtPctCota(r) {
+  const g = Object.entries(r?.porGrupo || {}).filter(([, v]) => v && (v.pct5h || v.pctSemanal));
+  return g.map(([k, v]) => `${k} ${String(Math.round((v.pct5h || 0) * 10) / 10).replace('.', ',')}% (5 h)`).join(', ') || '-';
+}
+function renderPreviaAjuste(pv) {
+  const box = $('pDemPrevia');
+  box.replaceChildren();
+  const pol = pv.politica;
+  box.append(el('div', { class: 'demanda-resumo', text: `Prévia: ${NOME_POLITICA[pol] || pol}` }));
+  if (pv.motivo) box.append(el('div', { class: 'hint', text: pv.motivo }));
+  const a = pv.antes || {}; const d = pv.depois || {};
+  const tab = el('table', { class: 'previa-tab' });
+  tab.append(el('thead', {}, el('tr', {}, el('th', { text: '' }), el('th', { text: 'Agora' }), el('th', { text: 'Com a mudança' }))));
+  const tb = el('tbody');
+  const linha = (rot, x, y, extra = '') => tb.append(el('tr', {}, el('th', { text: rot }), el('td', { text: x }), el('td', { text: y + extra })));
+  linha('Tempo', a.tempoSeg != null ? `~${formatarDuracao(a.tempoSeg)}` : '-', d.tempoSeg != null ? `~${formatarDuracao(d.tempoSeg)}` : '-', fmtDiferenca(a.tempoSeg, d.tempoSeg, formatarDuracao));
+  // Claude lê quase tudo do cache: sem somar o cache, a entrada dele parece perto de zero.
+  const lidos = (r) => (r.entrada != null ? r.entrada + (r.cacheLido || 0) : null);
+  linha('Tokens lidos (entrada + cache)', lidos(a) != null ? `~${fmtTokens(lidos(a))}` : '-', lidos(d) != null ? `~${fmtTokens(lidos(d))}` : '-', fmtDiferenca(lidos(a), lidos(d), fmtTokens));
+  linha('Tokens de saída', a.saida != null ? `~${fmtTokens(a.saida)}` : '-', d.saida != null ? `~${fmtTokens(d.saida)}` : '-', fmtDiferenca(a.saida, d.saida, fmtTokens));
+  linha('Custo', a.usd != null ? `~US$ ${fmtUsd(a.usd)}` : '-', d.usd != null ? `~US$ ${fmtUsd(d.usd)}` : '-', fmtDiferenca(a.usd, d.usd, (v) => 'US$ ' + fmtUsd(v)));
+  linha('Cota', fmtPctCota(a), fmtPctCota(d));
+  tab.append(tb);
+  box.append(tab);
+  const muda = pv.mudancas || [];
+  if (pol === 'personalizado') {
+    // Todas as tarefas; a última coluna é uma lista de modelos. Cada troca refaz a prévia com as escolhas.
+    const t2 = el('table', { class: 'previa-tab' });
+    t2.append(el('thead', {}, el('tr', {}, el('th', { text: 'Tarefa' }), el('th', { text: 'Modelo agora' }), el('th', { text: 'Modelo escolhido' }), el('th', { text: 'Tempo da tarefa' }))));
+    const b2 = el('tbody');
+    for (const t of pv.tarefas || []) {
+      const sel = selectModelos(escolhasPers[t.id] || t.escolhido || t.de || '');
+      sel.onchange = () => { escolhasPers[t.id] = sel.value; abrirPrevia('personalizado'); };
+      const tempo = t.duracaoDe != null && t.duracaoPara != null && t.duracaoDe !== t.duracaoPara
+        ? `~${formatarDuracao(t.duracaoDe)} → ~${formatarDuracao(t.duracaoPara)}` : (t.duracaoPara != null ? `~${formatarDuracao(t.duracaoPara)}` : '-');
+      b2.append(el('tr', {}, el('td', { text: `${t.id} ${t.titulo || ''}`.trim() }), el('td', { class: 'chain', text: `${t.de || '-'}${t.esforcoDe ? ` · ${t.esforcoDe}` : ''}` }), el('td', {}, sel), el('td', { class: 'num', text: tempo })));
+    }
+    t2.append(b2);
+    box.append(t2);
+  } else if (muda.length) {
+    const t2 = el('table', { class: 'previa-tab' });
+    t2.append(el('thead', {}, el('tr', {}, el('th', { text: 'Tarefa' }), el('th', { text: 'Modelo agora' }), el('th', { text: 'Modelo com a mudança' }))));
+    const b2 = el('tbody');
+    const fm = (m, e) => `${m || '-'}${e ? ` · ${e}` : ''}`;
+    for (const m of muda) b2.append(el('tr', {}, el('td', { text: `${m.id} ${m.titulo || ''}`.trim() }), el('td', { class: 'chain', text: fm(m.de, m.esforcoDe) }), el('td', { class: 'chain', text: fm(m.para, m.esforcoPara) })));
+    t2.append(b2);
+    box.append(t2);
+  } else {
+    box.append(el('p', { class: 'hint', text: 'Nenhuma tarefa muda de modelo com essa opção.' }));
+  }
+  const acoes = el('div', { class: 'row demanda-acoes' });
+  if (muda.length) {
+    const ap = el('button', { type: 'button', class: 'primary', text: pol === 'ignorar' ? 'Voltar aos originais' : 'Aplicar' });
+    ap.onclick = async () => {
+      ap.disabled = true;
+      const corpo = pol === 'personalizado' ? { politica: pol, cadeias: { ...escolhasPers } } : { politica: pol };
+      try { await call('POST', `/api/projetos/${atual}/aplicar-ajuste-cota`, corpo); escolhasPers = {}; box.classList.add('hidden'); refresh(); } catch (e) { alert(e.message); ap.disabled = false; }
+    };
+    acoes.append(ap);
+  }
+  const fechar = el('button', { type: 'button', text: muda.length ? 'Cancelar' : 'Fechar' });
+  fechar.onclick = () => { escolhasPers = {}; box.classList.add('hidden'); };
+  acoes.append(fechar);
+  box.append(acoes);
+  box.classList.remove('hidden');
+}
+let escolhasPers = {};
+// Modelos que fazem sentido escolher por tarefa: Claude (com esforço), agy e os gratuitos que o kit já usa.
+function opcoesModelos() {
+  const inst = (CAT.modelos || []).filter((m) => m.instalado).map((m) => m.id);
+  const claude = [];
+  for (const id of inst.filter((x) => x.startsWith('claude:'))) {
+    if (/haiku/i.test(id)) claude.push(id); else for (const e of ['low', 'medium', 'high']) claude.push(`${id}@${e}`);
+  }
+  const agy = inst.filter((x) => x.startsWith('agy:'));
+  const gratis = [...new Set([...(CAT.desespero || []), ...inst.filter((x) => x.startsWith('opencode:opencode/'))])].filter((x) => inst.includes(x));
+  return [['Claude', claude], ['Gemini e outros (Antigravity)', agy], ['Gratuitos (opencode)', gratis]];
+}
+function selectModelos(atualId) {
+  const sel = el('select', { class: 'previa-sel' });
+  let achou = false;
+  for (const [rot, ids] of opcoesModelos()) {
+    if (!ids.length) continue;
+    const g = el('optgroup', { label: rot });
+    for (const id of ids) { const o = el('option', { value: id, text: id }); if (id === atualId) { o.selected = true; achou = true; } g.append(o); }
+    sel.append(g);
+  }
+  if (atualId && !achou) { const o = el('option', { value: atualId, text: atualId }); o.selected = true; sel.prepend(o); }
+  return sel;
+}
+async function abrirPrevia(pol) {
+  const corpo = pol === 'personalizado' ? { politica: pol, cadeias: { ...escolhasPers } } : { politica: pol };
+  renderPreviaAjuste(await call('POST', `/api/projetos/${atual}/previa-ajuste-cota`, corpo));
+}
+for (const [btnId, pol] of [['pDemAuto', 'auto'], ['pDemEcon', 'economizar'], ['pDemMelhor', 'usar_melhor'], ['pDemPers', 'personalizado'], ['pDemIgnorar', 'ignorar']]) {
+  if ($(btnId)) $(btnId).onclick = async () => {
+    const b = $(btnId); b.disabled = true;
+    if (pol !== 'personalizado') escolhasPers = {};
+    try { await abrirPrevia(pol); } catch (e) { alert(e.message); }
+    finally { b.disabled = false; }
+  };
+}
 $('pGerar').onclick = async () => { try { await call('POST', `/api/projetos/${atual}/gerar-plano`); refresh(); } catch (e) { alert(e.message); } };
 $('pModo').onchange = async () => {
   const k = $('pModo').value;

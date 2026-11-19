@@ -18,11 +18,11 @@ export const QUOTA_RE = /(quota|rate[ _-]?limit|RESOURCE_EXHAUSTED|\b429\b|usage
 // rodando os testes, 10 testes ocultos. Desempate: resultados anteriores e tempo.
 // Detalhes em vault/guias_e_comandos/skill_delegar_orquestracao.md, seção "Modelos gratuitos".
 export const DESESPERO = [
-  'opencode:nvidia/minimaxai/minimax-m3.1-flash', // NVIDIA (17/11/2026): respondeu em 20 s; cota sem limite total, só por requisições/minuto. Preferido entre os gratuitos.
   'opencode:opencode/glm-5.3-flash-free',      // 20/20 e 10/10
-  'opencode:opencode/big-pickle',               // 20/20 e 10/10; o mais rápido (17 a 22 s)
+  'opencode:opencode/big-pickle',               // 20/20 e 10/10; o mais rápido (17 a 22 s); no plano da cobrinha (19/11) levou 10 min, nota 4
   'opencode:opencode/minimax-m3.1-flash-free',  // 10/10 (a falha da tarefa 1 foi de caminho curto do Windows)
   'opencode:opencode/iceman-free',              // 20/20 e 10/10
+  'opencode:nvidia/minimaxai/minimax-m3.1-flash', // NVIDIA: sem cota total, mas derruba sessões longas; o plano da cobrinha levou ~10 h 45 (19/11/2026).
   'opencode:opencode/beam-free',                // 20/20 e 10/10
   'opencode:opencode/inkling-2-small-free',     // 20/20 e 10/10; modelo pequeno
   'opencode:opencode/longcat-2.5-free',         // 20/20 e 10/10; lento
@@ -36,11 +36,13 @@ export const DICAS = {
   'claude:sonnet': 'Equilíbrio entre qualidade e cota.',
   'claude:haiku': 'Rápido e barato; tarefa simples.',
   'agy:gemini-4-argon-high': 'Gemini 4 Argon: o mais forte do Antigravity.',
+  'agy:gemini-4-hydrogen-high': 'Gemini 4 Hydrogen em esforco alto.',
+  'agy:gemini-4-hydrogen-medium': 'Gemini 4 Hydrogen: intermediario entre Flash e Argon.',
   'agy:gemini-3.8-flash-high': 'Padrão de volume no modo econômico.',
   'agy:gemini-3.8-flash-medium': 'Bom equilíbrio entre custo e qualidade.',
   'agy:gemini-3.8-flash-low': 'Mecânico e barato.',
   'agy:gpt-oss-120b-medium': 'Fora da cota do Gemini; reserva do modo desespero.',
-  'opencode:nvidia/minimaxai/minimax-m3.1-flash': 'Gratuito pela NVIDIA (build.nvidia.com): sem cota total, só limite por minuto. 1º da reserva gratuita. GLM e DeepSeek da NVIDIA falharam no teste de 17/11 (travou e 410).',
+  'opencode:nvidia/minimaxai/minimax-m3.1-flash': 'Gratuito pela NVIDIA (build.nvidia.com): sem cota total, só limite por minuto. Inviável em projeto normal (19/11/2026: ~10 h 45 num plano de minutos); só no desespero, depois dos gratuitos do opencode. GLM e DeepSeek da NVIDIA falharam no teste de 17/11 (travou e 410).',
   'opencode:opencode/glm-5.3-flash-free': 'Gratuito. 1º no teste de 12/11 (30/30).',
   'opencode:opencode/big-pickle': 'Gratuito. 30/30 no teste de 12/11; o mais rápido.',
   'opencode:opencode/minimax-m3.1-flash-free': 'Gratuito. Acertou a correção de bugs; errou caminho curto do Windows na outra tarefa.',
@@ -58,7 +60,10 @@ export const DICAS = {
 
 const FIXOS = {
   claude: ['opus', 'sonnet', 'haiku', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-2'],
-  agy: ['gemini-4-argon-high', 'gemini-4-argon-medium', 'gemini-4-argon-low', 'gemini-3.8-flash-high', 'gemini-3.8-flash-medium',
+  agy: ['gemini-4-argon-high', 'gemini-4-argon-medium', 'gemini-4-argon-low',
+    'gemini-4-hydrogen-high', 'gemini-4-hydrogen-medium', 'gemini-4-hydrogen-low',
+    'gemini-4-carbon-high', 'gemini-4-carbon-medium', 'gemini-4-carbon-low',
+    'gemini-3.8-flash-high', 'gemini-3.8-flash-medium',
     'gemini-3.8-flash-low', 'claude-opus-5-5-high', 'claude-sonnet-5-5-high', 'claude-sonnet-5-5-medium', 'gpt-oss-120b-medium'],
   opencode: ['nvidia/minimaxai/minimax-m3.1-flash', 'opencode/glm-5.3-flash-free', 'opencode/deepseek-v4.1-flash-free', 'opencode/minimax-m3.1-flash-free',
     'opencode/mimo-v2.6-flash-free', 'opencode/big-pickle', 'opencode/longcat-2.5-free', 'opencode/nemotron-3.5-super-vl-free',
@@ -93,7 +98,9 @@ export const disponivel = (entry) => !!detectar()[provedorDe(entry)];
 // Descoberta de modelos: lê `agy models` e `opencode models`, acumula o resultado em
 // dataDir/modelos-descobertos.json e marca como "novo" o que ainda não é conhecido no catálogo.
 // ---------------------------------------------------------------------------------------------
-const MAX_DESCOBERTOS = 400;
+// 19/11/2026: com 400, o OpenRouter (centenas de modelos) enchia a lista e o corte descartava os mais novos (o Neon
+// aparecia em 'novos' e sumia em seguida). O limite subiu e o corte prefere agy e quem acabou de aparecer.
+const MAX_DESCOBERTOS = 2000;
 const ARQUIVO = 'modelos-descobertos.json';
 const ANSI_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]/g;
 const SEG_OPENCODE_RE = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/;
@@ -102,6 +109,9 @@ const TOKEN_AGY_RE = /^[a-z0-9][a-z0-9.-]+$/;
 // Estado em memória: id -> { primeiraVez, ultimaVez }.
 let DESCOBERTOS = new Map();
 let ESTADO = { emAndamento: false, quando: null, erros: {}, promessa: null };
+// Quando cada provedor listou com sucesso pela última vez. Com isso o catálogo mostra só o que a CLI ainda lista
+// (o Carbon ficava na tela por estar na lista fixa, mesmo fora do agy).
+let ULTIMA_OK = {};
 
 // Transforma a saída de texto de uma CLI em ids 'prov:modelo' válidos. O que não casar é descartado.
 export function analisarSaida(prov, texto) {
@@ -203,7 +213,9 @@ function carregar(dataDir) {
         if (typeof v === 'string') erros[k] = limparTexto(v);
       }
     }
-    return { mapa, quando: dataValida(dados.atualizado, null), erros };
+    const ultimaOk = {};
+    if (dados.ultimaOk && typeof dados.ultimaOk === 'object') for (const k of ['agy', 'opencode']) { const v = dados.ultimaOk[k]; if (typeof v === 'string' && !Number.isNaN(Date.parse(v))) ultimaOk[k] = v; }
+    return { mapa, quando: dataValida(dados.atualizado, null), erros, ultimaOk };
   } catch {
     try { fs.renameSync(arq, `${arq}.corrompido-${carimbo()}`); } catch { /* sem permissão: segue vazio */ }
     return { mapa: new Map(), quando: null, erros: {} };
@@ -214,7 +226,7 @@ function gravar(dataDir, atualizado, erros) {
   fs.mkdirSync(dataDir, { recursive: true });
   const arq = path.join(dataDir, ARQUIVO);
   const tmp = `${arq}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ versao: 1, atualizado, modelos: ordenados(), erros }, null, 2), 'utf8');
+  fs.writeFileSync(tmp, JSON.stringify({ versao: 1, atualizado, modelos: ordenados(), erros, ultimaOk: ULTIMA_OK }, null, 2), 'utf8');
   fs.renameSync(tmp, arq);
 }
 
@@ -262,6 +274,7 @@ export function iniciarDescoberta({ dataDir, timeoutMs = 45000, provedores = det
   let lido = { mapa: new Map(), quando: null, erros: {} };
   try { if (dataDir) lido = carregar(dataDir); } catch { /* segue vazio */ }
   DESCOBERTOS = lido.mapa;
+  ULTIMA_OK = { ...(lido.ultimaOk || {}) };
   ESTADO = { emAndamento: true, quando: lido.quando, erros: lido.erros, promessa: null };
 
   const rodar = async () => {
@@ -278,7 +291,9 @@ export function iniciarDescoberta({ dataDir, timeoutMs = 45000, provedores = det
       resultados.forEach((r, i) => {
         const prov = alvos[i];
         if (r.status === 'rejected') { erros[prov] = mensagemDe(r.reason); return; }
-        for (const id of analisarSaida(prov, r.value)) {
+        const ids = analisarSaida(prov, r.value);
+        if (ids.length) ULTIMA_OK[prov] = agora; // listagem vazia (CLI com erro silencioso) não esconde nada
+        for (const id of ids) {
           const antigo = DESCOBERTOS.get(id);
           if (antigo) antigo.ultimaVez = agora;
           else {
@@ -288,7 +303,9 @@ export function iniciarDescoberta({ dataDir, timeoutMs = 45000, provedores = det
         }
       });
       if (DESCOBERTOS.size > MAX_DESCOBERTOS) {
-        const mantidos = ordenados().sort((a, b) => (a.ultimaVez < b.ultimaVez ? 1 : a.ultimaVez > b.ultimaVez ? -1 : 0)).slice(0, MAX_DESCOBERTOS);
+        const peso = (d) => (provedorDe(d.id) === 'agy' ? 0 : 1);
+        const mantidos = ordenados().sort((a, b) => (a.ultimaVez !== b.ultimaVez ? (a.ultimaVez < b.ultimaVez ? 1 : -1)
+          : peso(a) !== peso(b) ? peso(a) - peso(b) : (a.primeiraVez < b.primeiraVez ? 1 : a.primeiraVez > b.primeiraVez ? -1 : 0))).slice(0, MAX_DESCOBERTOS);
         DESCOBERTOS = new Map(mantidos.map((d) => [d.id, { primeiraVez: d.primeiraVez, ultimaVez: d.ultimaVez }]));
       }
       if (alvos.length && dataDir) {
@@ -315,6 +332,7 @@ export function atualizarListas() {
 // Só para testes: zera o estado em memória.
 export function _reiniciarDescoberta() {
   DESCOBERTOS = new Map();
+  ULTIMA_OK = {};
   ESTADO = { emAndamento: false, quando: null, erros: {}, promessa: null };
 }
 
@@ -337,8 +355,17 @@ export function catalogo() {
   const efetivo = desesperoEfetivo();
   const modelos = [];
   for (const prov of ['claude', 'agy', 'opencode']) {
-    const achados = ordenados().filter((d) => provedorDe(d.id) === prov).map((d) => d.id.slice(prov.length + 1));
-    const ids = [...new Set([...(FIXOS[prov] || []), ...achados])];
+    const doProv = ordenados().filter((d) => provedorDe(d.id) === prov);
+    const desde = ULTIMA_OK[prov];
+    let ids;
+    if (desde) {
+      // Só o que a última listagem com sucesso trouxe; da lista fixa fica só o que a CLI ainda oferece.
+      const vivos = doProv.filter((d) => d.ultimaVez >= desde).map((d) => d.id.slice(prov.length + 1));
+      const vivosSet = new Set(vivos);
+      ids = [...new Set([...(FIXOS[prov] || []).filter((m) => vivosSet.has(m)), ...vivos])];
+    } else {
+      ids = [...new Set([...(FIXOS[prov] || []), ...doProv.map((d) => d.id.slice(prov.length + 1))])];
+    }
     for (const m of ids) {
       const id = `${prov}:${m}`;
       const rank = efetivo.indexOf(id);

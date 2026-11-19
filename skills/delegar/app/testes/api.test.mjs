@@ -675,7 +675,10 @@ test('validarHostEscuta: aceita padrao e 127.0.0.1; recusa outros hosts em env e
 
 test('processo tentando subir com host nao-local encerra com codigo diferente de 0', () => {
   const p = spawn(process.execPath, [SERVER], {
-    env: { ...process.env, DELEGAR_HOST: '0.0.0.0', DELEGAR_PORT: '8798', DELEGAR_PROVEDORES: 'nenhum' },
+    // Pasta própria: sem ela o servidor abriria os projetos reais de ~/.delegar (caso de 18/11, que
+    // liberou o planejador de um projeto em andamento).
+    env: { ...process.env, DELEGAR_HOST: '0.0.0.0', DELEGAR_PORT: '8798', DELEGAR_PROVEDORES: 'nenhum',
+      DELEGAR_DATA: fs.mkdtempSync(path.join(os.tmpdir(), 'delegar-host-')), DELEGAR_VAULT: fs.mkdtempSync(path.join(os.tmpdir(), 'delegar-host-cofre-')) },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -857,6 +860,74 @@ test('POST /api/projetos/:id/ajustes altera cadeias e atualiza cadeiaEfetiva', a
     const rExec = await post(`/api/projetos/${id}/ajustes`, { cadeias: { t1: novaCadeia } });
     assert.equal(rExec.status, 409);
     assert.equal(rExec.json.erro, 'execução em andamento');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('POST /api/projetos/:id/agendar e aplicar-ajuste-cota: validação, segurança, 409 e demanda', async () => {
+  const id = '202611170000-teste-agendamento-demanda';
+  const dir = path.join(DATA, 'projects', id);
+  fs.mkdirSync(dir, { recursive: true });
+  const arq = path.join(dir, 'project.json');
+  const proj = {
+    id,
+    titulo: 'Teste Agendamento e Demanda',
+    pedido: 'Pedido de teste',
+    repo: REPO,
+    modo: 'padrao',
+    velocidade: 'auto',
+    supervisao: 'automatico',
+    auto: false,
+    criado: new Date().toISOString(),
+    estado: 'plano_pronto',
+    mensagens: [],
+    plano: {
+      resumo: 'Plano teste',
+      tarefas: [
+        { id: 't1', titulo: 'T1', tipo: 'codigo', nivel: 'pesado', depende: [], prompt: 'Fazer t1' },
+      ],
+    },
+    uso: { chamadas: [] },
+  };
+  fs.writeFileSync(arq, JSON.stringify(proj, null, 2), 'utf8');
+  try {
+    // 1. Sem token -> 401
+    assert.equal((await req('POST', `/api/projetos/${id}/agendar`, { body: { cancelar: true }, token: null })).status, 401);
+    assert.equal((await req('POST', `/api/projetos/${id}/aplicar-ajuste-cota`, { body: { politica: 'auto' }, token: null })).status, 401);
+
+    // 2. Data inválida / XSS -> 400 sem ecoar
+    const payloadXss = '<script>alert(1)</script>';
+    const rInv = await post(`/api/projetos/${id}/agendar`, { executarEm: payloadXss });
+    assert.equal(rInv.status, 400);
+    assert.ok(!rInv.txt.includes('<script>'), 'não pode ecoar entrada maliciosa');
+
+    // 3. Agendamento válido -> 200
+    const futuro = new Date(Date.now() + 2 * 3600e3).toISOString();
+    const rAg = await post(`/api/projetos/${id}/agendar`, { executarEm: futuro });
+    assert.equal(rAg.status, 200);
+    assert.equal(rAg.json.agendamento?.ativo, true);
+
+    // 4. Cancelamento -> 200
+    const rCanc = await post(`/api/projetos/${id}/agendar`, { cancelar: true });
+    assert.equal(rCanc.status, 200);
+    assert.equal(rCanc.json.agendamento?.ativo, false);
+
+    // 5. GET /api/projetos/:id responde 200 e aplicar-ajuste-cota funciona
+    const rGet = await get(`/api/projetos/${id}`);
+    assert.equal(rGet.status, 200);
+    assert.ok('demanda' in rGet.json, 'campo demanda exposto na visão completa');
+
+    const rPol = await post(`/api/projetos/${id}/aplicar-ajuste-cota`, { politica: 'economizar' });
+    assert.equal(rPol.status, 200);
+    assert.equal(rPol.json.politicaCota, 'economizar');
+
+    // 6. Bloqueio 409 durante execução
+    const salvo = JSON.parse(fs.readFileSync(arq, 'utf8'));
+    salvo.estado = 'executando';
+    fs.writeFileSync(arq, JSON.stringify(salvo, null, 2), 'utf8');
+    assert.equal((await post(`/api/projetos/${id}/agendar`, { executarEm: futuro })).status, 409);
+    assert.equal((await post(`/api/projetos/${id}/aplicar-ajuste-cota`, { politica: 'auto' })).status, 409);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

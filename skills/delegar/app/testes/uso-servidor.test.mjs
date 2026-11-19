@@ -414,7 +414,7 @@ test('GET /api/projetos/:id/uso traz planejador primeiro, tarefas e totais exato
   assert.equal(t2.total.saida, 172);
   assert.equal(t2.total.cacheLido, 150);
   assert.equal(t2.total.cacheGravado, 200);
-  assert.equal(t2.total.usd, 0.0021);
+  assert.equal(t2.total.usd, 0.014739);
   assert.equal(t2.tentativas.length, 1);
   assert.equal(t2.tentativas[0].fonte, 'cli-parcial');
   assert.equal(t2.tentativas[0].fim, null);
@@ -424,7 +424,7 @@ test('GET /api/projetos/:id/uso traz planejador primeiro, tarefas e totais exato
   assert.equal(j.total.saida, 500 + 1000 + 172);       // 1672
   assert.equal(j.total.cacheLido, 200 + 500 + 150);    // 850
   assert.equal(j.total.cacheGravado, 200);
-  assert.equal(j.total.usd, 0.0396);                  // 0.0125 + 0.025 + 0.0021
+  assert.equal(j.total.usd, 0.052239);                  // 0.0125 + 0.025 + 0.014739 (glm gratuito: equivalente de API, ignora cost da CLI)
   assert.ok(typeof j.total.brl === 'number' && j.total.brl > 0);
 
   // Modelos do projeto
@@ -440,7 +440,7 @@ test('GET /api/projetos/:id/uso traz planejador primeiro, tarefas e totais exato
   const glm = j.modelos.find((m) => m.modelo === 'opencode/glm-5.3-flash-free');
   assert.ok(glm);
   assert.equal(glm.entrada, 146482);
-  assert.equal(glm.usd, 0.0021);
+  assert.equal(glm.usd, 0.014739);
   assert.equal(glm.assinatura, null);
 });
 
@@ -456,7 +456,7 @@ test('GET /api/uso: período hoje filtra só o projeto de hoje com números exat
   assert.equal(j.total.saida, 1672);
   assert.equal(j.total.cacheLido, 850);
   assert.equal(j.total.cacheGravado, 200);
-  assert.equal(j.total.usd, 0.0396);
+  assert.equal(j.total.usd, 0.052239);
 });
 
 test('GET /api/uso: período 7d traz só o projeto de hoje', async () => {
@@ -470,7 +470,7 @@ test('GET /api/uso: período 7d traz só o projeto de hoje', async () => {
   assert.equal(j.total.saida, 1672);
   assert.equal(j.total.cacheLido, 850);
   assert.equal(j.total.cacheGravado, 200);
-  assert.equal(j.total.usd, 0.0396);
+  assert.equal(j.total.usd, 0.052239);
 });
 
 test('GET /api/uso: período 30d (padrão) inclui hoje e 15d com números exatos', async () => {
@@ -491,8 +491,8 @@ test('GET /api/uso: período 30d (padrão) inclui hoje e 15d com números exatos
   assert.equal(j.total.saida, 1672 + 300);
   assert.equal(j.total.cacheLido, 850);
   assert.equal(j.total.cacheGravado, 200);
-  // Hoje: 0.0396 + 15d: (0.003 + 0.004) = 0.007 -> 0.0466
-  assert.equal(j.total.usd, 0.0466);
+  // Hoje: 0.052239 + 15d: (0.003 + 0.004) = 0.007 -> 0.059239
+  assert.equal(j.total.usd, 0.059239);
 });
 
 test('GET /api/uso: período tudo inclui os 3 projetos com números exatos', async () => {
@@ -508,8 +508,8 @@ test('GET /api/uso: período tudo inclui os 3 projetos com números exatos', asy
   assert.equal(j.total.saida, 1972 + 50);
   assert.equal(j.total.cacheLido, 850);
   assert.equal(j.total.cacheGravado, 200);
-  // 0.0466 + 45d: (0.0005 + 0.0006) = 0.0011 -> 0.0477
-  assert.equal(j.total.usd, 0.0477);
+  // 0.059239 + 45d: (0.0005 + 0.0006) = 0.0011 -> 0.060339
+  assert.equal(j.total.usd, 0.060339);
 });
 
 test('GET /api/uso: filtro por mês traz projetos específicos do mês', async () => {

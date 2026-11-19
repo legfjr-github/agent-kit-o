@@ -3,7 +3,7 @@
 // estimado). Módulo standalone ESM puro sem dependências externas.
 import fs from 'node:fs';
 import path from 'node:path';
-import { modeloSemEsforco, usoDaTentativa, estimar } from './uso.mjs';
+import { modeloSemEsforco, usoDaTentativa, estimar, temConsumoReal, chaveAgrupamentoModelo, consolidarListaModelos } from './uso.mjs';
 import { carregarPrecos, custoUsd, assinaturaDe, emBrl } from './precos.mjs';
 
 const PROVEDORES = ['claude', 'agy', 'opencode'];
@@ -491,7 +491,8 @@ export function dadosUsoDaRodada(p, rodadaInfo, tabela, { projDir, usoAgyReal } 
       }];
 
       for (const l of linhas) {
-        const chave = `${l.provedor}:${l.modelo}`;
+        if (!temConsumoReal(l)) continue;
+        const chave = chaveAgrupamentoModelo(l.provedor, l.modelo);
         let mEntry = modelosMap.get(chave);
         if (!mEntry) {
           mEntry = {
@@ -507,6 +508,11 @@ export function dadosUsoDaRodada(p, rodadaInfo, tabela, { projDir, usoAgyReal } 
             assinatura: assinaturaDe(l.provedor),
           };
           modelosMap.set(chave, mEntry);
+        }
+        const canônico = chave.slice(chave.indexOf(':') + 1);
+        if (String(l.modelo ?? '').toLowerCase() === canônico.toLowerCase()
+          && String(mEntry.modelo ?? '').toLowerCase() !== canônico.toLowerCase()) {
+          mEntry.modelo = l.modelo;
         }
         mEntry.entrada += l.entrada;
         mEntry.saida += l.saida;
@@ -524,7 +530,7 @@ export function dadosUsoDaRodada(p, rodadaInfo, tabela, { projDir, usoAgyReal } 
   rodadaTotal.origem = piorOrigem(rodadaOrigens);
   rodadaTotal.aproximado = rodadaOrigens.some((o) => o === 'aproximado' || o === 'estimado');
 
-  const modelosOut = Array.from(modelosMap.values()).map((m) => {
+  const modelosOut = consolidarListaModelos(Array.from(modelosMap.values()).map((m) => {
     const usd = arred(m.usd);
     return {
       provedor: m.provedor,
@@ -539,7 +545,9 @@ export function dadosUsoDaRodada(p, rodadaInfo, tabela, { projDir, usoAgyReal } 
       assinatura: m.assinatura,
       estimado: m.origens.some((o) => o === 'estimado') || m.fontes.some((f) => f === 'estimado'),
     };
-  }).sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0) || (b.entrada + b.saida) - (a.entrada + a.saida));
+  }))
+    .map((x) => ({ ...x, brl: x.usd !== null ? emBrl(tab, x.usd) : null }))
+    .sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0) || (b.entrada + b.saida) - (a.entrada + a.saida));
 
   return {
     emAndamento,
@@ -997,7 +1005,8 @@ export function dadosUsoProjetoComRodadas(p, { projDir, dataDir, tabela, usoAgyR
           origem: tent.origem,
         }];
         for (const l of linhas) {
-          const chave = `${l.provedor}:${l.modelo}`;
+          if (!temConsumoReal(l)) continue;
+          const chave = chaveAgrupamentoModelo(l.provedor, l.modelo);
           let mEntry = modelosMap.get(chave);
           if (!mEntry) {
             mEntry = {
@@ -1014,6 +1023,11 @@ export function dadosUsoProjetoComRodadas(p, { projDir, dataDir, tabela, usoAgyR
             };
             modelosMap.set(chave, mEntry);
           }
+          const canônico = chave.slice(chave.indexOf(':') + 1);
+          if (String(l.modelo ?? '').toLowerCase() === canônico.toLowerCase()
+            && String(mEntry.modelo ?? '').toLowerCase() !== canônico.toLowerCase()) {
+            mEntry.modelo = l.modelo;
+          }
           mEntry.entrada += l.entrada || 0;
           mEntry.saida += l.saida || 0;
           mEntry.cacheLido += l.cacheLido || 0;
@@ -1027,7 +1041,8 @@ export function dadosUsoProjetoComRodadas(p, { projDir, dataDir, tabela, usoAgyR
 
     if (rc.tarefas.length === 0 || !rc.tarefas.some((tf) => tf.tentativas?.length > 0)) {
       for (const m of rc.modelos || []) {
-        const chave = `${m.provedor}:${m.modelo}`;
+        if (!temConsumoReal(m)) continue;
+        const chave = chaveAgrupamentoModelo(m.provedor, m.modelo);
         let mEntry = modelosMap.get(chave);
         if (!mEntry) {
           mEntry = {
@@ -1044,6 +1059,11 @@ export function dadosUsoProjetoComRodadas(p, { projDir, dataDir, tabela, usoAgyR
           };
           modelosMap.set(chave, mEntry);
         }
+        const canônico = chave.slice(chave.indexOf(':') + 1);
+        if (String(m.modelo ?? '').toLowerCase() === canônico.toLowerCase()
+          && String(mEntry.modelo ?? '').toLowerCase() !== canônico.toLowerCase()) {
+          mEntry.modelo = m.modelo;
+        }
         mEntry.entrada += m.entrada || 0;
         mEntry.saida += m.saida || 0;
         mEntry.cacheLido += m.cacheLido || 0;
@@ -1059,7 +1079,7 @@ export function dadosUsoProjetoComRodadas(p, { projDir, dataDir, tabela, usoAgyR
   projTotal.origem = piorOrigem(projOrigens);
   projTotal.aproximado = projOrigens.some((o) => o === 'aproximado' || o === 'estimado');
 
-  const modelosOut = Array.from(modelosMap.values()).map((m) => {
+  const modelosOut = consolidarListaModelos(Array.from(modelosMap.values()).map((m) => {
     const usd = arred(m.usd);
     return {
       provedor: m.provedor,
@@ -1074,7 +1094,9 @@ export function dadosUsoProjetoComRodadas(p, { projDir, dataDir, tabela, usoAgyR
       assinatura: m.assinatura,
       estimado: m.origens.some((o) => o === 'estimado') || m.fontes.some((f) => f === 'estimado'),
     };
-  }).sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0) || (b.entrada + b.saida) - (a.entrada + a.saida));
+  }))
+    .map((x) => ({ ...x, brl: x.usd !== null ? emBrl(tab, x.usd) : null }))
+    .sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0) || (b.entrada + b.saida) - (a.entrada + a.saida));
 
   const tarefasOut = rodadasCalculadas.length === 1
     ? rodadasCalculadas[0].tarefas

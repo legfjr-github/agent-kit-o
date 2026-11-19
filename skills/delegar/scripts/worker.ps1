@@ -15,10 +15,23 @@ param(
   [int]$QuotaCheckMinutes = 3,
   [switch]$NoFreeFallback,
   [int]$IdleTimeoutMinutes = 20,
-  [int]$IdleTimeoutSeconds = 0
+  [int]$IdleTimeoutSeconds = 0,
+  # Wait before retrying an opencode:nvidia/* model that stalled (possible 40 RPM limit); short values help tests.
+  [int]$NvidiaRpmWaitSeconds = 65,
+  # Quantos workers usam a NVIDIA gratuita ao mesmo tempo no PC inteiro (todos os projetos).
+  # 18/11/2026: um worker faz ~0,3 requisicao/min (cada resposta leva ~3,7 min), longe dos 40 RPM; 5 em teste.
+  # DELEGAR_NVIDIA_MAX sobrepoe. O primeiro worker que cria o semaforo fixa o numero ate todos sairem.
+  [int]$NvidiaMaxWorkers = 5,
+  # Espera antes de repetir o mesmo modelo depois de uma falha passageira do provedor (rede/servidor).
+  [int]$TransientWaitSeconds = 15
 )
+if ($env:DELEGAR_NVIDIA_MAX -match '^\d+$' -and [int]$env:DELEGAR_NVIDIA_MAX -ge 1) { $NvidiaMaxWorkers = [int]$env:DELEGAR_NVIDIA_MAX }
 
-$idleLimitSec = if ($IdleTimeoutSeconds -gt 0) { $IdleTimeoutSeconds } elseif ($IdleTimeoutMinutes -gt 0) { $IdleTimeoutMinutes * 60 } else { 0 }
+$idleBaseSec = if ($IdleTimeoutSeconds -gt 0) { $IdleTimeoutSeconds } elseif ($IdleTimeoutMinutes -gt 0) { $IdleTimeoutMinutes * 60 } else { 0 }
+$idleLimitSec = $idleBaseSec
+# 19/11/2026: na NVIDIA gratuita cada resposta pode levar ate 7 min de fila; o vigia de 20 min cortava sessoes vivas.
+# Com o limite em minutos (padrao), modelos opencode:nvidia/* ganham pelo menos 30 min. IdleTimeoutSeconds (testes) nao muda.
+$NvidiaIdleMinSec = 1800
 
 $ErrorActionPreference = 'Continue'
 $Chain = @($Chain | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -41,8 +54,10 @@ $agy = $env:AGY_BIN
 if (-not $agy) { $c = Get-Command agy -ErrorAction SilentlyContinue; if ($c) { $agy = $c.Source } }
 if (-not $agy) { $agy = Join-Path $env:USERPROFILE '.gemini\bin\agy.exe' }
 $quotaRe = '(?i)(quota|rate[ _-]?limit|RESOURCE_EXHAUSTED|\b429\b|usage limit|limit reached|out of credits|exceeded your|hit your|try again (later|in))'
+# Falha passageira do provedor (rede ou servidor), diferente de erro da tarefa: vale repetir ou trocar de modelo.
+$transienteRe = '(?i)(ECONNRESET|ETIMEDOUT|ECONNREFUSED|Connection reset|socket hang up|ProviderHeaderTimeoutError|ProviderResponseStreamError|headers timed out|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout|overloaded|empty conversation id|failed to start conversation)'
 $base = Get-Content $PromptFile -Raw -Encoding UTF8
-$resumeNote = "`n`nATENCAO: um modelo anterior comecou esta tarefa e parou por falta de cota. Antes de tudo, rode git status e git log -3, veja o que ja foi feito e continue dali, sem refazer nem apagar o trabalho pronto.`n"
+$resumeNote = "`n`nATENCAO: um modelo anterior comecou esta tarefa e parou antes de terminar (falta de cota, queda de conexao ou falta de resposta). Antes de tudo, rode git status e git log -3, veja o que ja foi feito e continue dali, sem refazer nem apagar o trabalho pronto.`n"
 
 # Last actions of a Claude stream-json log, to brief the next model on a handoff.
 function ResumoAcoes($outFile, $max = 40) {
@@ -109,6 +124,23 @@ function LastHit($kind, [string]$grp = '') {
 
 # Why a provider must be skipped before starting (no quota left or close to the limit), or $null to go ahead.
 # Checked before every attempt, so a task never starts on a provider that is already out of quota.
+# OPENCODE_CONFIG_CONTENT que desliga todos os servidores MCP do opencode.jsonc do usuario (o worker nao usa).
+function OpencodeSemMcp {
+  $nomes = @()
+  foreach ($f in @('opencode.jsonc', 'opencode.json', 'config.json')) {
+    $c = Join-Path $env:USERPROFILE ".config\opencode\$f"
+    if (-not (Test-Path $c)) { continue }
+    try {
+      $txt = [IO.File]::ReadAllText($c) -replace '(?m)^\s*//.*$', ''
+      $j = $txt | ConvertFrom-Json
+      if ($j.mcp) { $nomes += @($j.mcp.PSObject.Properties | ForEach-Object { $_.Name }) }
+    } catch {}
+  }
+  $mcp = [ordered]@{}
+  foreach ($n in ($nomes | Select-Object -Unique)) { $mcp[$n] = @{ enabled = $false } }
+  return (@{ mcp = $mcp } | ConvertTo-Json -Compress -Depth 4)
+}
+
 function SemCota($kind, $model) {
   if ($kind -eq 'opencode') { return $null }
   $q = QuotaAll
@@ -256,21 +288,48 @@ if ($NoFreeFallback -and @($Chain | Where-Object { -not (EhGratuito $_) }).Count
 
 $attempts = @()
 $ok = $false
-$i = 0
+$i = 0               # attempt counter (log file numbering); a retry of the same model gets a new number
 $pularAte = 0        # after a handoff, skip the remaining Claude entries
 $notaHandoff = $null
-foreach ($entry in $Chain) {
+$nvidiaRpmRetries = @{}
+$transientRetries = @{}
+for ($chainIdx = 0; $chainIdx -lt $Chain.Count; $chainIdx++) {
+  $entry = $Chain[$chainIdx]
+  $pos = $chainIdx + 1   # 1-based position of the entry in the chain
   $i++
-  if ($i -lt $pularAte) { continue }
+  if ($pos -lt $pularAte) { continue }
   $kind, $model = $entry.Split(':', 2)
   $effort = $null
   if ($model -match '^(.+)@(low|medium|high|xhigh|max)$') { $model = $Matches[1]; $effort = $Matches[2] }
   # Skip a provider that is out of (or close to the end of) its quota; the last entry always runs unless NoFreeFallback.
-  if ($NoFreeFallback -or $i -lt $Chain.Count) {
+  if ($NoFreeFallback -or $pos -lt $Chain.Count) {
     $motivo = SemCota $kind $model
     if ($motivo) {
       Ev 'troca' $entry "pulado antes de comecar: $motivo"
       $attempts += [pscustomobject]@{ worker = $entry; exitCode = $null; quota = $true; skipped = $motivo; emptyOutput = $false
+        started = (Get-Date).ToString('s'); finished = (Get-Date).ToString('s'); out = $null; err = $null; text = $null; uso = $null }
+      continue
+    }
+  }
+  # NVIDIA gratuita: no maximo $NvidiaMaxWorkers ao mesmo tempo no PC inteiro, entre todos os projetos.
+  # Lotada: pula para o proximo modelo; se esta for a ultima opcao da cadeia, espera uma vaga (ate 3 h).
+  $nvSem = $null
+  if ($entry -like 'opencode:nvidia/*') {
+    # Uma pasta de dados (DELEGAR_DATA, usada pelos testes) tem semaforo proprio; os workers reais dividem um so.
+    $semNome = 'Local\delegar-nvidia-workers'
+    if ($env:DELEGAR_DATA) {
+      $h = [BitConverter]::ToString([Security.Cryptography.SHA1]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($env:DELEGAR_DATA.ToLower()))).Replace('-', '').Substring(0, 12)
+      $semNome += "-$h"
+    }
+    $nvSem = New-Object System.Threading.Semaphore($NvidiaMaxWorkers, $NvidiaMaxWorkers, $semNome)
+    $ultima = (-not $NoFreeFallback) -and ($pos -ge $Chain.Count)
+    $espera = if ($ultima) { 3 * 3600 * 1000 } else { 0 }
+    if ($ultima) { Ev 'espera' $entry "aguardando vaga na NVIDIA (ate $NvidiaMaxWorkers ao mesmo tempo)" }
+    if (-not $nvSem.WaitOne($espera)) {
+      $nvSem.Dispose(); $nvSem = $null
+      $motivo = "NVIDIA lotada (ja ha $NvidiaMaxWorkers workers usando)"
+      Ev 'troca' $entry "pulado antes de comecar: $motivo"
+      $attempts += [pscustomobject]@{ worker = $entry; exitCode = $null; quota = $false; skipped = $motivo; emptyOutput = $false
         started = (Get-Date).ToString('s'); finished = (Get-Date).ToString('s'); out = $null; err = $null; text = $null; uso = $null }
       continue
     }
@@ -285,6 +344,7 @@ foreach ($entry in $Chain) {
   [IO.File]::WriteAllText((Join-Path $LogDir 'current.json'), ([pscustomobject]@{ worker = $entry; attempt = $i; started = $start.ToString('s') } | ConvertTo-Json -Compress), $utf8)
   Ev 'tentativa' $entry "comecou (tentativa $i de $($Chain.Count))"
 
+  $idleLimitSec = if ($IdleTimeoutSeconds -le 0 -and $idleBaseSec -gt 0 -and $entry -like 'opencode:nvidia/*') { [Math]::Max($idleBaseSec, $NvidiaIdleMinSec) } else { $idleBaseSec }
   $runRes = $null
   if ($kind -eq 'agy') {
     [IO.File]::WriteAllText($pf, $prompt, $utf8)    # o agy-runner.ps1 le o prompt deste arquivo
@@ -303,17 +363,24 @@ foreach ($entry in $Chain) {
     [IO.File]::WriteAllText($pf, $prompt, $utf8)
     $eff = if ($effort) { "--effort $effort" } else { '' }
     $proximo = 0
-    for ($k = $i; $k -lt $Chain.Count; $k++) { if (-not $Chain[$k].StartsWith('claude:')) { $proximo = $k + 1; break } }
+    for ($k = $pos; $k -lt $Chain.Count; $k++) { if (-not $Chain[$k].StartsWith('claude:')) { $proximo = $k + 1; break } }
     $runRes = RunWatchedProcess 'claude' "-p --model $model $eff --dangerously-skip-permissions --output-format stream-json --verbose" $pf $out $err $true $proximo
   } elseif ($kind -eq 'opencode') {
     # --auto: same trust level as the other providers (they run with --dangerously-skip-permissions).
     $eff = if ($effort) { "--variant $effort" } else { '' }
     [IO.File]::WriteAllText($pf, $prompt, $utf8)    # kept only so the usage can be estimated afterwards
+    # Opencode enxuto (18/11/2026): sem os servidores MCP do opencode.jsonc e sem as skills e o CLAUDE.md
+    # do Claude Code. Medido: 149 mil tokens de entrada por requisicao caem para 12 mil; na fila gratuita
+    # da NVIDIA isso era a diferenca entre minutos e segundos por resposta. As instrucoes do kit continuam.
+    $env:OPENCODE_DISABLE_CLAUDE_CODE = '1'
+    $env:OPENCODE_DISABLE_EXTERNAL_SKILLS = '1'
+    $env:OPENCODE_CONFIG_CONTENT = (OpencodeSemMcp)
     $runRes = RunWatchedProcess 'opencode' "run --pure --auto --model $model $eff --format json --title `"delegar $taskId`"" $pf $out $err $false 0
   } else {
     Ev 'erro' $entry "provedor desconhecido: $kind"
     continue
   }
+  if ($nvSem) { try { [void]$nvSem.Release() } catch {}; $nvSem.Dispose(); $nvSem = $null }
 
   if ($runRes.stalled) {
     Ev 'vigia' $entry "sem saida nem evento por $([Math]::Round($idleLimitSec / 60, 2)) min; encerrando e passando para o proximo modelo"
@@ -321,6 +388,12 @@ foreach ($entry in $Chain) {
       worker = $entry; exitCode = -1; quota = $false; stalled = $true; emptyOutput = $true
       started = $start.ToString('s'); finished = (Get-Date).ToString('s'); out = $out; err = $err; text = $txt
       uso = $null
+    }
+    if ($entry -like 'opencode:nvidia/*' -and ([int]$nvidiaRpmRetries[$entry]) -lt 2) {
+      $nvidiaRpmRetries[$entry] = ([int]$nvidiaRpmRetries[$entry]) + 1
+      Ev 'espera' $entry "sem saida (possivel 40 RPM da NVIDIA); aguardando $NvidiaRpmWaitSeconds s para retentar ($($nvidiaRpmRetries[$entry])/2)"
+      Start-Sleep -Seconds $NvidiaRpmWaitSeconds
+      $chainIdx--
     }
     continue
   }
@@ -343,7 +416,9 @@ foreach ($entry in $Chain) {
   $fin = FinalText $kind $out
   $finText = [string]$fin.text
   [IO.File]::WriteAllText($txt, $finText, $utf8)
-  $errText = if (Test-Path $err) { [string](Get-Content $err -Raw -Encoding UTF8) } else { '' }
+  # ReadAllText respeita o BOM: o agy-runner grava o .err.log em UTF-16 (19/11/2026: com -Encoding UTF8 o texto
+  # vinha com um nulo entre cada letra e nem a checagem de cota nem a de falha passageira enxergavam o erro).
+  $errText = if (Test-Path $err) { [string][IO.File]::ReadAllText($err) } else { '' }
   $empty = [string]::IsNullOrWhiteSpace($finText)
   $failed = ($code -ne 0) -or $fin.isError -or $empty
   # Quota is only checked on failures, on the final answer and stderr, so code that mentions "quota" is not a false alarm.
@@ -368,6 +443,20 @@ foreach ($entry in $Chain) {
 
   if (-not $failed) { $ok = $true; Ev 'concluiu' $entry 'terminou a tarefa'; break }
   if ($quota) { Ev 'troca' $entry 'sem cota; passando para o proximo modelo'; continue }
+  # Falha passageira do provedor (18/11/2026: a NVIDIA derrubou a conexao, ECONNRESET, e a tarefa inteira
+  # falhava sem tentar de novo nem passar ao proximo modelo). Repete o mesmo modelo ate 2 vezes, com 15 s
+  # de intervalo; depois segue a cadeia. O novo prompt traz o aviso de continuacao ($resumeNote).
+  if (($probe + "`n" + $errTail) -match $transienteRe) {
+    $n = ([int]$transientRetries[$entry]) + 1; $transientRetries[$entry] = $n
+    if ($n -le 2) {
+      Ev 'espera' $entry "falha passageira do provedor; repetindo em $TransientWaitSeconds s ($n/2)"
+      Start-Sleep -Seconds $TransientWaitSeconds
+      $chainIdx--
+      continue
+    }
+    Ev 'troca' $entry 'falha passageira repetida; passando para o proximo modelo'
+    continue
+  }
   if ($empty) { Ev 'troca' $entry 'terminou sem resposta; passando para o proximo modelo'; continue }
   Ev 'falhou' $entry "falhou (codigo $code)"
   break                                  # real failure: let the orchestrator decide

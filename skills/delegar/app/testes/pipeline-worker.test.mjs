@@ -170,6 +170,55 @@ test('worker.ps1 -IdleTimeoutSeconds (vigia) encerra comando travado e passa par
   }
 });
 
+// 3b. opencode:nvidia/* travado sem saida: 1 tentativa + 2 retentativas, depois fallback
+test('worker.ps1 retenta opencode:nvidia/* travado 3 vezes (eventos espera) e cai para o proximo modelo', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-test-3b-'));
+  try {
+    const binDir = path.join(dir, 'bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    // opencode falso: trava sem escrever nada
+    fs.writeFileSync(path.join(binDir, 'opencode.cmd'), '@echo off\r\nping 127.0.0.1 -n 31 >nul\r\nexit /b 0\r\n', 'utf8');
+    const mockAgy = path.join(dir, 'mock-agy.bat');
+    fs.writeFileSync(mockAgy, '@echo off\r\necho Resposta do agy\r\nexit /b 0\r\n', 'utf8');
+
+    const promptFile = path.join(dir, 'task.md');
+    fs.writeFileSync(promptFile, 'Responda ok.', 'utf8');
+    const logDir = path.join(dir, 'logs', 'task-3b');
+
+    execFileSync('powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', WORKER,
+      '-PromptFile', promptFile,
+      '-Cwd', dir,
+      '-LogDir', logDir,
+      '-Chain', 'opencode:nvidia/modelo-mock,agy:modelo-rapido',
+      '-IdleTimeoutSeconds', '2',
+      '-NvidiaRpmWaitSeconds', '1',
+    ], {
+      env: { ...process.env, DELEGAR_DATA: dir, AGY_BIN: mockAgy, PATH: binDir + path.delimiter + process.env.PATH },
+      encoding: 'utf8',
+      timeout: 90000,
+    });
+
+    const result = JSON.parse(fs.readFileSync(path.join(logDir, 'result.json'), 'utf8').replace(/^﻿/, ''));
+    assert.equal(result.ok, true);
+    assert.equal(result.model, 'agy:modelo-rapido');
+    assert.equal(result.attempts.length, 4);
+    const nv = result.attempts.filter((a) => a.worker === 'opencode:nvidia/modelo-mock');
+    assert.equal(nv.length, 3);
+    assert.ok(nv.every((a) => a.stalled === true));
+    assert.equal(new Set(nv.map((a) => a.out)).size, 3, 'cada tentativa tem seu proprio log');
+    assert.match(result.attempts[3].out, /4-modelo-rapido\.out\.log$/);
+
+    const eventos = fs.readFileSync(path.join(dir, 'logs', 'events.jsonl'), 'utf8').trim().split(/\r?\n/).map((l) => JSON.parse(l));
+    const esperas = eventos.filter((e) => e.tipo === 'espera');
+    assert.equal(esperas.length, 2);
+    assert.match(esperas[0].texto, /1\/2/);
+    assert.match(esperas[1].texto, /2\/2/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // 4. pipeline.ps1 Verify ignora sujeira preexistente e reprova sujeira nova da tarefa main
 test('pipeline.ps1 Verify ignora sujeira preexistente e reprova sujeira nova de tarefa main', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-test-4-'));
